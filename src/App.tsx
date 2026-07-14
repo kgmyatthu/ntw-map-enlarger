@@ -1,5 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
+import type { MouseEvent as ReactMouseEvent, WheelEvent as ReactWheelEvent } from "react";
 import JSZip from "jszip";
+import type {
+  Tree, Species, TreeList, LoadedTreeList, HeightMap, Zone, DepSeg, Deployment,
+  LoadedDeployment, FileStore, Bundle, RemovedTree, UndoAction, Tool, FillAlgo, LayerState,
+  Entity, View, DragState, Styles,
+} from "./types";
 
 // =====================================================================
 // NTW CUSTOM MAP ENLARGER
@@ -11,12 +17,12 @@ import JSZip from "jszip";
 // =====================================================================
 
 // ---------- tree_list codec (LRDZ 14B / RIKI 16B records) ----------
-function parseTreeList(buf) {
+function parseTreeList(buf: ArrayBufferLike): TreeList {
   const d = new Uint8Array(buf);
   const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
   const magic = String.fromCharCode(d[8], d[9], d[10], d[11]);
   const stride = magic === "RIKI" ? 16 : 14;
-  const starts = [];
+  const starts: { off: number; len: number }[] = [];
   let i = 0;
   while (i < d.length - 4) {
     if (d[i] === 0x0e) {
@@ -34,7 +40,7 @@ function parseTreeList(buf) {
   }
   if (!starts.length) throw new Error("no species blocks");
   const header = d.slice(0, starts[0].off);
-  const species = [];
+  const species: Species[] = [];
   for (let s = 0; s < starts.length; s++) {
     const { off, len } = starts[s];
     let name = "";
@@ -42,7 +48,7 @@ function parseTreeList(buf) {
     const nameBytes = d.slice(off, off + 3 + len * 2);
     const ds = off + 3 + len * 2;
     const end = s + 1 < starts.length ? starts[s + 1].off : d.length;
-    const trees = [];
+    const trees: Tree[] = [];
     let j = ds + 4;
     while (j + stride <= end && d[j] === 0x00 && d[j + 1] === 0x0c) {
       trees.push({ x: dv.getFloat32(j + 2, true), z: dv.getFloat32(j + 6, true), extra: d.slice(j + 10, j + stride), isNew: false });
@@ -53,9 +59,9 @@ function parseTreeList(buf) {
   return { header, species, stride, magic, origBytes: d };
 }
 
-function discoverSizeFields(d) {
+function discoverSizeFields(d: Uint8Array) {
   const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
-  const L = d.length, hdr = [], ftr = [];
+  const L = d.length, hdr: [number, number][] = [], ftr: [number, number][] = [];
   let off = 0;
   while (off < Math.min(48, L - 3)) {
     const v = dv.getUint32(off, true);
@@ -69,7 +75,7 @@ function discoverSizeFields(d) {
   return { hdr, ftr };
 }
 
-function buildTreeList(parsed) {
+function buildTreeList(parsed: TreeList): Uint8Array<ArrayBuffer> {
   const { header, species, stride, origBytes } = parsed;
   let size = header.length;
   for (const s of species) size += s.nameBytes.length + 4 + s.trees.length * stride + s.trailing.length;
@@ -96,7 +102,7 @@ function buildTreeList(parsed) {
 }
 
 // ---------- DDS heightmap reader (8/16/24/32-bit uncompressed) ----------
-function readDDS(buf) {
+function readDDS(buf: ArrayBufferLike): HeightMap {
   const dv = new DataView(buf);
   const h = dv.getUint32(12, true), w = dv.getUint32(16, true);
   const bits = dv.getUint32(88, true);
@@ -116,10 +122,10 @@ function readDDS(buf) {
   return { w, h, px };
 }
 
-function heightToCanvas(hm) {
+function heightToCanvas(hm: HeightMap): HTMLCanvasElement {
   const cv = document.createElement("canvas");
   cv.width = hm.w; cv.height = hm.h;
-  const ctx = cv.getContext("2d");
+  const ctx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
   const im = ctx.createImageData(hm.w, hm.h);
   let mn = 1, mx = 0;
   for (let i = 0; i < hm.px.length; i++) { if (hm.px[i] < mn) mn = hm.px[i]; if (hm.px[i] > mx) mx = hm.px[i]; }
@@ -133,37 +139,37 @@ function heightToCanvas(hm) {
 }
 
 // ---------- XML enlarge edits ----------
-function scaleAttr(xml, attr, f) {
+function scaleAttr(xml: string, attr: string, f: number) {
   return xml.replace(new RegExp(`(${attr}=')([0-9.]+)(')`, "g"),
-    (m, a, v, c) => `${a}${(parseFloat(v) * f).toFixed(6)}${c}`);
+    (m: string, a: string, v: string, c: string) => `${a}${(parseFloat(v) * f).toFixed(6)}${c}`);
 }
-function setScale(xml, scale) {
-  return xml.replace(/(scale=')([0-9.\-]+)(')/g, (m, a, v, c) => `${a}${scale}${c}`);
+function setScale(xml: string, scale: string) {
+  return xml.replace(/(scale=')([0-9.\-]+)(')/g, (m: string, a: string, v: string, c: string) => `${a}${scale}${c}`);
 }
 
 // ---------- deployment_areas.xml (text-preserving zone editor) ----------
-function parseDeployment(text) {
+function parseDeployment(text: string): Deployment {
   // normalise European decimal commas inside attribute values
   text = text.replace(/(=')([\-0-9]+),([0-9]+)(')/g, "$1$2.$3$4");
-  const segs = [];        // alternating raw text / zone segments
-  const zones = [];
+  const segs: DepSeg[] = [];        // alternating raw text / zone segments
+  const zones: Zone[] = [];
   const re = /<deployment_area[\s\S]*?<\/deployment_area>/g;
-  let last = 0, m, block = -1;
-  const blockStarts = [];
+  let last = 0, m: RegExpExecArray | null, block = -1;
+  const blockStarts: number[] = [];
   const bre = /<BATTLE_DEPLOYMENT_AREAS>/g;
-  let bm;
+  let bm: RegExpExecArray | null;
   while ((bm = bre.exec(text))) blockStarts.push(bm.index);
   const alRe = /<ALLIANCE id='(\d+)'>/g;
-  const alliances = [];
-  let am;
+  const alliances: { idx: number; id: number }[] = [];
+  let am: RegExpExecArray | null;
   while ((am = alRe.exec(text))) alliances.push({ idx: am.index, id: +am[1] });
   while ((m = re.exec(text))) {
     segs.push({ raw: text.slice(last, m.index) });
     const seg = m[0];
-    const g = (rx) => { const r = rx.exec(seg); return r ? parseFloat(r[1]) : 0; };
+    const g = (rx: RegExp) => { const r = rx.exec(seg); return r ? parseFloat(r[1]) : 0; };
     let blk = 0; for (let i = 0; i < blockStarts.length; i++) if (blockStarts[i] < m.index) blk = i;
     let al = 0; for (const a of alliances) if (a.idx < m.index) al = a.id;
-    const z = {
+    const z: Zone = {
       x: g(/x="([\-0-9.]+)"/), y: g(/y="([\-0-9.]+)"/),
       w: g(/width metres="([\-0-9.]+)"/), h: g(/height metres="([\-0-9.]+)"/),
       o: g(/orientation radians="([\-0-9.]+)"/),
@@ -178,7 +184,7 @@ function parseDeployment(text) {
   return { segs, zones, nBlocks, changed: false };
 }
 
-function serializeDeployment(dep) {
+function serializeDeployment(dep: Deployment): string {
   let out = "";
   for (const s of dep.segs) {
     if (s.raw !== undefined) { out += s.raw; continue; }
@@ -196,51 +202,51 @@ function serializeDeployment(dep) {
 const SP_COLORS = ["#7ec97e", "#5fb8b8", "#c9b45f", "#b88add", "#e08b6d", "#8fa9e0", "#d97fa6", "#a3c95f"];
 
 export default function MapEnlarger() {
-  const [files, setFiles] = useState(null);
+  const [files, setFiles] = useState<FileStore | null>(null);
   const [mapName, setMapName] = useState("");
-  const [colourImg, setColourImg] = useState(null);
-  const [hmCanvas, setHmCanvas] = useState(null);
-  const [trees, setTrees] = useState(null);
-  const [deploy, setDeploy] = useState(null);
+  const [colourImg, setColourImg] = useState<HTMLImageElement | null>(null);
+  const [hmCanvas, setHmCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [trees, setTrees] = useState<LoadedTreeList | null>(null);
+  const [deploy, setDeploy] = useState<LoadedDeployment | null>(null);
   const [blockIdx, setBlockIdx] = useState(0);
-  const [selZone, setSelZone] = useState(null);
+  const [selZone, setSelZone] = useState<number | null>(null);
   const [shiftN, setShiftN] = useState(400);
   const [enlarged, setEnlarged] = useState(false);
   const [baseSize, setBaseSize] = useState(2048);
   const [scaleOpt, setScaleOpt] = useState("");
-  const [factor, setFactor] = useState(2);
+  const [factor, setFactor] = useState<1.5 | 2>(2);
   const [appliedF, setAppliedF] = useState(1);
-  const [shaderMsg, setShaderMsg] = useState(null);
+  const [shaderMsg, setShaderMsg] = useState<string | null>(null);
   const [batchShift, setBatchShift] = useState(400);  // deployment shift metres
-  const [batchLog, setBatchLog] = useState([]);
+  const [batchLog, setBatchLog] = useState<string[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
-  const [bundles, setBundles] = useState([]);
-  const [curBundle, setCurBundle] = useState(null);
+  const [bundles, setBundles] = useState<Bundle[]>([]);
+  const [curBundle, setCurBundle] = useState<number | null>(null);
   const [gridOpen, setGridOpen] = useState(false);
-  const [fillAlgo, setFillAlgo] = useState("cluster");
+  const [fillAlgo, setFillAlgo] = useState<FillAlgo>("cluster");
   const [fillN, setFillN] = useState("");
-  const [layer, setLayer] = useState({ colour: true, height: true, trees: true, deploy: true });
-  const [tool, setTool] = useState("pan");
-  const [entity, setEntity] = useState({ kind: "tree", idx: 0 });
+  const [layer, setLayer] = useState<LayerState>({ colour: true, height: true, trees: true, deploy: true });
+  const [tool, setTool] = useState<Tool>("pan");
+  const [entity, setEntity] = useState<Entity>({ kind: "tree", idx: 0 });
   const [brushR, setBrushR] = useState(60);
   const [density, setDensity] = useState(6);
   const [status, setStatus] = useState("Import a map folder zip to begin.");
   const [, tick] = useState(0);
   const rr = () => tick(t => t + 1);
 
-  const canvasRef = useRef(null);
-  const view = useRef({ zoom: 0.16, cx: 0, cz: 0 });
-  const drag = useRef(null);
-  const cursor = useRef(null);
-  const undoRef = useRef([]);
-  const xmlRef = useRef({});
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const view = useRef<View>({ zoom: 0.16, cx: 0, cz: 0 });
+  const drag = useRef<DragState | null>(null);
+  const cursor = useRef<[number, number] | null>(null);
+  const undoRef = useRef<UndoAction[]>([]);
+  const xmlRef = useRef<Record<string, string>>({});
 
   const mapSize = enlarged ? Math.round(baseSize * appliedF) : baseSize;
   const imgExtent = baseSize;
 
-  const loadStore = (store, root, displayName, processedFactor, depOverride) => {
+  const loadStore = (store: FileStore, root: string, displayName: string, processedFactor: number, depOverride: LoadedDeployment | null) => {
     {
-      const get = (n) => { for (const [p, v] of store) if (p === root + n || p.endsWith("/" + n) || p === n) return { p, v }; return null; };
+      const get = (n: string) => { for (const [p, v] of store) if (p === root + n || p.endsWith("/" + n) || p === n) return { p, v }; return null; };
 
       const def = get("definition.xml");
       if (!def) throw new Error("no definition.xml in zip");
@@ -256,7 +262,7 @@ export default function MapEnlarger() {
         if (s) xmlRef.current[s.p] = new TextDecoder().decode(s.v);
       }
 
-      let ci = null;
+      let ci: { p: string; v: Uint8Array<ArrayBuffer> } | null = null;
       for (const n of ["colour_map_0.JPG", "colour_map_0.jpg", "colour_map_0.png"]) { ci = get(n); if (ci) break; }
       if (ci) {
         const im = new Image();
@@ -272,7 +278,8 @@ export default function MapEnlarger() {
           const im = new Image();
           im.onload = () => {
             const cv = document.createElement("canvas"); cv.width = im.width; cv.height = im.height;
-            const cx = cv.getContext("2d"); cx.filter = "grayscale(1)"; cx.drawImage(im, 0, 0);
+            const cx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
+            cx.filter = "grayscale(1)"; cx.drawImage(im, 0, 0);
             setHmCanvas(cv); rr();
           };
           im.src = URL.createObjectURL(new Blob([hm.v]));
@@ -297,7 +304,7 @@ export default function MapEnlarger() {
     }
   };
 
-  const applyScale = (v) => {
+  const applyScale = (v: string) => {
     setScaleOpt(v);
     if (!files) return;
     const b = curBundle !== null ? bundles[curBundle] : null;
@@ -319,7 +326,7 @@ export default function MapEnlarger() {
 
 
 
-  const addTreesAt = (pts) => {
+  const addTreesAt = (pts: [number, number][]) => {
     if (!trees || entity.kind !== "tree") return;
     const s = trees.species[entity.idx];
     const src = s.trees.length ? s.trees : trees.species.find(x => x.trees.length)?.trees;
@@ -329,8 +336,8 @@ export default function MapEnlarger() {
     undoRef.current.push({ type: "tree-add", si: entity.idx, n: added.length });
     rr();
   };
-  const eraseAt = (wx, wz) => {
-    const removed = [];
+  const eraseAt = (wx: number, wz: number) => {
+    const removed: RemovedTree[] = [];
     if (trees) trees.species.forEach((s, si) => {
       for (let i = s.trees.length - 1; i >= 0; i--) {
         const t = s.trees[i], dx = t.x - wx, dz = t.z - wz;
@@ -342,17 +349,18 @@ export default function MapEnlarger() {
   const undo = () => {
     const a = undoRef.current.pop();
     if (!a) return;
-    if (a.type === "fill") { a.addedPer.forEach((n, si) => n && trees.species[si].trees.splice(-n, n)); refreshCurThumb(); }
-    else if (a.type === "zone-move") { const z = deploy.zones[a.zi]; z.x = a.x; z.y = a.y; if (a.y0 !== undefined) z.y0 = a.y0; deploy.changed = true; }
-    else if (a.type === "tree-add") trees.species[a.si].trees.splice(-a.n, a.n);
-    else [...a.removed].reverse().forEach(r => trees.species[r.si].trees.splice(r.i, 0, r.t));
+    // non-null trees/deploy: undo entries are only pushed while that state exists
+    if (a.type === "fill") { a.addedPer.forEach((n, si) => n && trees!.species[si].trees.splice(-n, n)); refreshCurThumb(); }
+    else if (a.type === "zone-move") { const z = deploy!.zones[a.zi]; z.x = a.x; z.y = a.y; if (a.y0 !== undefined) z.y0 = a.y0; deploy!.changed = true; }
+    else if (a.type === "tree-add") trees!.species[a.si].trees.splice(-a.n, a.n);
+    else [...a.removed].reverse().forEach(r => trees!.species[r.si].trees.splice(r.i, 0, r.t));
     rr();
   };
 
   // grid.fx patch — the streak fix. The terrain shader computes colour/blend
   // UVs as world_position.xz / terrain_size_meters + 0.5 with the CPU feeding
   // 2048; scaling the divisor widens the window to match the enlarged map.
-  const patchGridFx = async (file) => {
+  const patchGridFx = async (file: File) => {
     let txt = await file.text();
     const A = "float2 tex_cm = r.world_position.xz/(terrain_size_meters);";
     const B = "float2 offset = 1.0f / (terrain_size_meters);";
@@ -391,10 +399,10 @@ export default function MapEnlarger() {
     if (!colourImg) return null;
     const S = 512;
     const cv = document.createElement("canvas"); cv.width = S; cv.height = S;
-    const cx = cv.getContext("2d");
+    const cx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
     cx.drawImage(colourImg, 0, 0, S, S);
     const d = cx.getImageData(0, 0, S, S).data;
-    return (wx, wz) => {
+    return (wx: number, wz: number) => {
       const u = wx / mapSize + 0.5, v = 1 - (wz / mapSize + 0.5);   // row 0 = +Z
       const px = Math.min(S - 1, Math.max(0, (u * S) | 0)), py = Math.min(S - 1, Math.max(0, (v * S) | 0));
       const i = (py * S + px) * 4, r = d[i], g = d[i + 1], b = d[i + 2], m = (r + g + b) / 3;
@@ -415,14 +423,14 @@ export default function MapEnlarger() {
     const cw = fillAlgo === "colour" ? colourWeightFn() : null;
     // spatial hash for 'spaced'
     const cell = Math.max(8, Math.sqrt((mapSize * mapSize) / Math.max(1, total + target)) * 0.7);
-    const hash = new Map();
-    const hkey = (x, z) => ((x / cell) | 0) + ":" + ((z / cell) | 0);
+    const hash = new Map<string, boolean>();
+    const hkey = (x: number, z: number) => ((x / cell) | 0) + ":" + ((z / cell) | 0);
     if (fillAlgo === "spaced") for (const [x, z] of all) hash.set(hkey(x, z), true);
     const addedPer = trees.species.map(() => 0);
     let added = 0, tries = 0;
     while (added < target && tries < target * 40) {
       tries++;
-      let wx, wz;
+      let wx: number, wz: number;
       if (fillAlgo === "cluster") {
         const [bx, bz] = all[(Math.random() * all.length) | 0];
         const a = Math.random() * 6.283, r = Math.abs((Math.random() + Math.random() + Math.random()) / 1.5 - 1) * 90;
@@ -459,20 +467,20 @@ export default function MapEnlarger() {
     setBundles(bundles.slice());
   };
 
-  const makeThumb = async (colourBytes, treePts, zoneRects, extent) => {
+  const makeThumb = async (colourBytes: Uint8Array<ArrayBuffer> | null, treePts: number[][] | null, zoneRects: number[][] | null, extent: number) => {
     const S = 220;
     const cv = document.createElement("canvas"); cv.width = S; cv.height = S;
-    const ctx = cv.getContext("2d");
+    const ctx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
     ctx.fillStyle = "#1a2016"; ctx.fillRect(0, 0, S, S);
     if (colourBytes) {
-      const img = await new Promise(res => {
+      const img = await new Promise<HTMLImageElement | null>(res => {
         const im = new Image();
         im.onload = () => res(im); im.onerror = () => res(null);
         im.src = URL.createObjectURL(new Blob([colourBytes]));
       });
       if (img) { ctx.save(); ctx.translate(0, S); ctx.scale(1, -1); ctx.drawImage(img, 0, 0, S, S); ctx.restore(); }
     }
-    const w2t = (x, z) => [(x / extent + 0.5) * S, (z / extent + 0.5) * S];
+    const w2t = (x: number, z: number): [number, number] => [(x / extent + 0.5) * S, (z / extent + 0.5) * S];
     if (treePts) {
       ctx.fillStyle = "#7ec97e";
       for (let i = 0; i < treePts.length; i += Math.max(1, (treePts.length / 2500) | 0)) {
@@ -503,7 +511,7 @@ export default function MapEnlarger() {
     if (!bundles.length) return;
     syncCurrent();
     const outZip = new JSZip();
-    const used = new Set();
+    const used = new Set<string>();
     for (const b of bundles) {
       let root = b.root || b.name + "/";
       let base = root;
@@ -524,15 +532,16 @@ export default function MapEnlarger() {
     setStatus(`Bulk export: ${bundles.length} maps in one zip (includes any per-map edits).`);
   };
 
-  const applyBatchShift = async (n) => {
+  const applyBatchShift = async (n: number) => {
     setBatchShift(n);
     if (!bundles.length || isNaN(n)) return;
     syncCurrent();                                   // keep any tree brushing
     const enc = new TextEncoder();
     for (const b of bundles) {
       if (!b.dep) continue;
-      for (const z of b.dep.zones) z.y = z.y0 + (z.y0 >= 0 ? 1 : -1) * n;
-      b.store.set(b.depPath, enc.encode(serializeDeployment(b.dep)));
+      // non-null y0/depPath: batch-processed zones always get y0, dep implies depPath
+      for (const z of b.dep.zones) z.y = z.y0! + (z.y0! >= 0 ? 1 : -1) * n;
+      b.store.set(b.depPath!, enc.encode(serializeDeployment(b.dep)));
       b.exported = false;
     }
     if (curBundle !== null && bundles[curBundle]) {
@@ -544,11 +553,11 @@ export default function MapEnlarger() {
     // regenerate thumbnails so the grid shows the new zone positions
     for (const b of bundles) {
       if (!b.dep) continue;
-      let pts = null;
+      let pts: number[][] | null = null;
       const tKey = [...b.store.keys()].find(p => p.endsWith("bmd.tree_list"));
-      if (tKey && b.store.get(tKey).length > 40) {
+      if (tKey && b.store.get(tKey)!.length > 40) {   // non-null: tKey came from store.keys()
         try {
-          const v = b.store.get(tKey);
+          const v = b.store.get(tKey)!;
           const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
           pts = tp.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
         } catch (e) { /* keep old thumb trees */ }
@@ -559,18 +568,18 @@ export default function MapEnlarger() {
     setStatus(`Deployment shift ${n} m applied live to all ${bundles.length} maps \u2014 grid + viewer updated.`);
   };
 
-  const processBatch = async (fileList) => {
+  const processBatch = async (fileList: File[]) => {
     if (!fileList.length || batchBusy) return;
     setBatchBusy(true);
-    const log = [];
+    const log: string[] = [];
     setBatchLog(log.slice());
-    const newBundles = [];
+    const newBundles: Bundle[] = [];
     const enc = new TextEncoder();
     for (const f of fileList) {
       try {
         const zip = await JSZip.loadAsync(f);
-        const store = new Map();
-        let defPath = null;
+        const store: FileStore = new Map();
+        let defPath: string | null = null;
         for (const path of Object.keys(zip.files)) {
           if (zip.files[path].dir) continue;
           store.set(path, new Uint8Array(await zip.files[path].async("arraybuffer")));
@@ -578,11 +587,11 @@ export default function MapEnlarger() {
         }
         if (!defPath) throw new Error("no definition.xml");
         const inner = defPath.slice(0, -"definition.xml".length);
-        const out = new Map();
+        const out: FileStore = new Map();
 
-        let nTrees = 0, nZones = 0, scaleNote = "", origScale = null;
-        let thumbTrees = null, thumbZones = null, colourBytes = null, extent = 4096;
-        let bundleDep = null, depPath = null;
+        let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null;
+        let thumbTrees: number[][] | null = null, thumbZones: number[][] | null = null, colourBytes: Uint8Array<ArrayBuffer> | null = null, extent = 4096;
+        let bundleDep: LoadedDeployment | null = null, depPath: string | null = null;
         {
           const dtxt = new TextDecoder().decode(store.get(defPath));
           const bw = /base_terrain_width='([0-9.]+)'/.exec(dtxt);
@@ -603,10 +612,10 @@ export default function MapEnlarger() {
             if (name === "height_map_0_settings.xml" && before) { origScale = before; scaleNote = `scale ${before}`; }
             out.set(p, enc.encode(x));
           } else if (name === "deployment_areas.xml") {
-            const dp = parseDeployment(new TextDecoder().decode(v));
+            const dp: LoadedDeployment = { ...parseDeployment(new TextDecoder().decode(v)), path: p };
             for (const z of dp.zones) { z.y0 = z.y; z.y += (z.y >= 0 ? 1 : -1) * batchShift; }
             nZones = dp.zones.length;
-            dp.path = p; bundleDep = dp; depPath = p;
+            bundleDep = dp; depPath = p;
             out.set(p, enc.encode(serializeDeployment(dp)));
           } else if (name === "bmd.tree_list" && v.length > 40) {
             const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
@@ -623,7 +632,8 @@ export default function MapEnlarger() {
         newBundles.push({ name: f.name.replace(/\.zip$/i, ""), store: out, root: inner, factor, exported: false, thumb, nTrees, nZones, dep: bundleDep, depPath, colourBytes, extent, origScale });
         log.push(`\u2713 ${f.name}: \u00d7${factor}, ${nTrees} trees, ${nZones} zones +${batchShift}m, ${scaleNote}`);
       } catch (e) {
-        log.push(`\u2717 ${f.name}: ${e.message}`);
+        // cast: everything thrown here (JSZip failures, our own throws) is an Error
+        log.push(`\u2717 ${f.name}: ${(e as Error).message}`);
       }
       setBatchLog(log.slice());
     }
@@ -638,7 +648,7 @@ export default function MapEnlarger() {
     } else setStatus("Batch: no maps processed.");
   };
 
-  const viewBundle = (i) => {
+  const viewBundle = (i: number) => {
     syncCurrent();
     setCurBundle(i);
     setGridOpen(false);
@@ -670,20 +680,20 @@ export default function MapEnlarger() {
   };
 
   // ---------- canvas ----------
-  const w2s = (x, z, cw, ch) => [cw / 2 + (x - view.current.cx) * view.current.zoom, ch / 2 + (z - view.current.cz) * view.current.zoom];
-  const s2w = (sx, sz, cw, ch) => [(sx - cw / 2) / view.current.zoom + view.current.cx, (sz - ch / 2) / view.current.zoom + view.current.cz];
+  const w2s = (x: number, z: number, cw: number, ch: number): [number, number] => [cw / 2 + (x - view.current.cx) * view.current.zoom, ch / 2 + (z - view.current.cz) * view.current.zoom];
+  const s2w = (sx: number, sz: number, cw: number, ch: number): [number, number] => [(sx - cw / 2) / view.current.zoom + view.current.cx, (sz - ch / 2) / view.current.zoom + view.current.cz];
 
   const draw = useCallback(() => {
     const cv = canvasRef.current;
     if (!cv) return;
-    const ctx = cv.getContext("2d");
+    const ctx = cv.getContext("2d")!; // canvas 2d context is always available
     const cw = cv.width, ch = cv.height;
     ctx.fillStyle = "#12160f"; ctx.fillRect(0, 0, cw, ch);
     const half = mapSize / 2, ihalf = imgExtent / 2;
 
     // image row 0 = world +Z (verified: existing trees land on forest pixels
     // only with a vertical flip), so both image layers draw V-flipped.
-    const drawFlipped = (img, a, b, c, d) => {
+    const drawFlipped = (img: CanvasImageSource, a: number, b: number, c: number, d: number) => {
       ctx.save();
       ctx.translate(0, d);
       ctx.scale(1, -1);
@@ -702,7 +712,7 @@ export default function MapEnlarger() {
       drawFlipped(colourImg, a, b, c, d);
       ctx.globalAlpha = 1;
     }
-    const box = (hx, color, dash, label) => {
+    const box = (hx: number, color: string, dash: number[], label: string) => {
       const [a, b] = w2s(-hx, -hx, cw, ch), [c, d] = w2s(hx, hx, cw, ch);
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash(dash);
       ctx.strokeRect(a, b, c - a, d - b); ctx.setLineDash([]);
@@ -753,17 +763,17 @@ export default function MapEnlarger() {
 
   useEffect(() => { draw(); });
   useEffect(() => {
-    const cv = canvasRef.current;
+    const cv = canvasRef.current!;   // non-null: canvas is always mounted with the component
     const ro = new ResizeObserver(() => {
-      const r = cv.parentElement.getBoundingClientRect();
+      const r = cv.parentElement!.getBoundingClientRect();
       cv.width = r.width; cv.height = r.height; draw();
     });
-    ro.observe(cv.parentElement);
+    ro.observe(cv.parentElement!);   // non-null: canvas lives inside the viewer div
     return () => ro.disconnect();
   }, [draw]);
 
-  const stamp = (wx, wz) => {
-    const pts = [];
+  const stamp = (wx: number, wz: number) => {
+    const pts: [number, number][] = [];
     for (let k = 0; k < density; k++) {
       const a = Math.random() * 6.283, r = Math.sqrt(Math.random()) * brushR;
       const x = wx + Math.cos(a) * r, z = wz + Math.sin(a) * r;
@@ -772,15 +782,15 @@ export default function MapEnlarger() {
     addTreesAt(pts);
   };
 
-  const onMouse = (e) => {
-    const cv = canvasRef.current, rect = cv.getBoundingClientRect();
+  const onMouse = (e: ReactMouseEvent<HTMLCanvasElement>) => {
+    const cv = canvasRef.current!, rect = cv.getBoundingClientRect();   // non-null: handler fires on the mounted canvas
     const sx = e.clientX - rect.left, sz = e.clientY - rect.top;
     const [wx, wz] = s2w(sx, sz, cv.width, cv.height);
     cursor.current = [wx, wz];
     if (e.type === "mousedown") {
       if (e.button !== 0 || tool === "pan" || e.shiftKey) drag.current = { sx, sz, cx: view.current.cx, cz: view.current.cz, panning: true };
       else if (tool === "zones") {
-        let hit = null;
+        let hit: number | null = null;
         if (deploy) deploy.zones.forEach((z, zi) => {
           if (z.block !== blockIdx) return;
           const dx = wx - z.x, dz = wz - z.y;
@@ -790,7 +800,7 @@ export default function MapEnlarger() {
         });
         setSelZone(hit);
         if (hit !== null) {
-          const z = deploy.zones[hit];
+          const z = deploy!.zones[hit];   // non-null: hit is only set while iterating deploy.zones
           drag.current = { zone: hit, ox: z.x, oy: z.y, wx0: wx, wz0: wz };
           undoRef.current.push({ type: "zone-move", zi: hit, x: z.x, y: z.y, y0: z.y0 });
         }
@@ -806,11 +816,11 @@ export default function MapEnlarger() {
         view.current.cx = drag.current.cx - (sx - drag.current.sx) / view.current.zoom;
         view.current.cz = drag.current.cz - (sz - drag.current.sz) / view.current.zoom;
       } else if (drag.current?.zone !== undefined) {
-        const z = deploy.zones[drag.current.zone];
+        const z = deploy!.zones[drag.current.zone];   // non-null: zone drags only start when deploy exists
         z.x = Math.round((drag.current.ox + (wx - drag.current.wx0)) * 10) / 10;
         z.y = Math.round((drag.current.oy + (wz - drag.current.wz0)) * 10) / 10;
         if (z.y0 !== undefined) z.y0 = z.y - (z.y0 >= 0 ? 1 : -1) * batchShift;
-        deploy.changed = true;
+        deploy!.changed = true;
       } else if (drag.current?.painting) {
         const [lx, lz] = drag.current.last, d = Math.hypot(wx - lx, wz - lz);
         if (tool === "brush" && d > brushR * 0.6) { stamp(wx, wz); drag.current.last = [wx, wz]; }
@@ -820,9 +830,9 @@ export default function MapEnlarger() {
       draw();
     } else drag.current = null;
   };
-  const onWheel = (e) => {
+  const onWheel = (e: ReactWheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    const cv = canvasRef.current, rect = cv.getBoundingClientRect();
+    const cv = canvasRef.current!, rect = cv.getBoundingClientRect();   // non-null: handler fires on the mounted canvas
     const sx = e.clientX - rect.left, sz = e.clientY - rect.top;
     const [wx, wz] = s2w(sx, sz, cv.width, cv.height);
     const v = view.current;
@@ -833,16 +843,16 @@ export default function MapEnlarger() {
   };
 
   // ---------- UI ----------
-  const S = {
+  const S: Styles = {
     app: { display: "flex", height: "100vh", background: "#10140f", color: "#d9d4bd", fontFamily: "ui-monospace,'Cascadia Mono',Consolas,monospace", fontSize: 13 },
     side: { width: 292, padding: 14, borderRight: "1px solid #2b3226", overflowY: "auto", flexShrink: 0 },
     h: { fontSize: 15, letterSpacing: 1, color: "#e8e3c9", margin: "0 0 2px" },
     sub: { fontSize: 11, color: "#8a9179", margin: "0 0 12px" },
     lbl: { display: "block", fontSize: 10, textTransform: "uppercase", letterSpacing: 1.2, color: "#8a9179", margin: "13px 0 5px" },
     row: { display: "flex", gap: 6, alignItems: "center", marginBottom: 4 },
-    btn: (on) => ({ flex: 1, padding: "6px 4px", background: on ? "#4a5a3a" : "#1c2318", border: `1px solid ${on ? "#7a8a5a" : "#3a4433"}`, color: on ? "#f0ecd8" : "#b9b39a", borderRadius: 3, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }),
-    act: (en) => ({ width: "100%", padding: "9px", background: en ? "#5a4a1e" : "#242a1e", border: `1px solid ${en ? "#a08a3a" : "#3a4433"}`, color: en ? "#f0e8c0" : "#6a715c", borderRadius: 3, cursor: en ? "pointer" : "default", fontFamily: "inherit", fontSize: 13, marginTop: 6 }),
-    ent: (on) => ({ display: "flex", alignItems: "center", gap: 6, padding: "4px 7px", marginBottom: 2, background: on ? "#2a3323" : "transparent", border: `1px solid ${on ? "#5a6a44" : "transparent"}`, borderRadius: 3, cursor: "pointer", fontSize: 11 }),
+    btn: (on: boolean) => ({ flex: 1, padding: "6px 4px", background: on ? "#4a5a3a" : "#1c2318", border: `1px solid ${on ? "#7a8a5a" : "#3a4433"}`, color: on ? "#f0ecd8" : "#b9b39a", borderRadius: 3, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }),
+    act: (en: boolean) => ({ width: "100%", padding: "9px", background: en ? "#5a4a1e" : "#242a1e", border: `1px solid ${en ? "#a08a3a" : "#3a4433"}`, color: en ? "#f0e8c0" : "#6a715c", borderRadius: 3, cursor: en ? "pointer" : "default", fontFamily: "inherit", fontSize: 13, marginTop: 6 }),
+    ent: (on: boolean) => ({ display: "flex", alignItems: "center", gap: 6, padding: "4px 7px", marginBottom: 2, background: on ? "#2a3323" : "transparent", border: `1px solid ${on ? "#5a6a44" : "transparent"}`, borderRadius: 3, cursor: "pointer", fontSize: 11 }),
     num: { width: 64, background: "#1c2318", border: "1px solid #3a4433", color: "#d9d4bd", padding: "3px 6px", borderRadius: 3, fontFamily: "inherit" },
     status: { position: "absolute", left: 306, bottom: 10, right: 12, fontSize: 11, color: "#9aa287", background: "#141a10cc", padding: "6px 10px", borderRadius: 4, pointerEvents: "none" },
   };
@@ -863,9 +873,10 @@ export default function MapEnlarger() {
         </p>
 
         <label style={S.lbl}>Batch process (multi-zip)</label>
+          {/* non-null files: a file input's change event always carries a FileList */}
           <input type="file" accept=".zip" multiple style={{ fontSize: 11, width: "100%", color: "#b9b39a" }}
             disabled={batchBusy}
-            onChange={e => e.target.files.length && processBatch([...e.target.files])} />
+            onChange={e => e.target.files!.length && processBatch([...e.target.files!])} />
           <div style={S.row}>
             <span style={{ fontSize: 11, width: 108 }}>deploy shift (m)</span>
             <input style={S.num} type="number" value={batchShift} onChange={e => applyBatchShift(+e.target.value)} />
@@ -879,7 +890,7 @@ export default function MapEnlarger() {
           </div>
           <label style={S.lbl}>Tree auto-fill (current map)</label>
           <div style={S.row}>
-            {["cluster", "colour", "uniform", "spaced"].map(a => (
+            {(["cluster", "colour", "uniform", "spaced"] as const).map(a => (
               <button key={a} style={S.btn(fillAlgo === a)} onClick={() => setFillAlgo(a)}>{a}</button>
             ))}
           </div>
@@ -920,7 +931,7 @@ export default function MapEnlarger() {
           )}
 
         <label style={S.lbl}>Layers</label>
-        {["colour", "height", "trees", "deploy"].map(k => (
+        {(["colour", "height", "trees", "deploy"] as const).map(k => (
           <div key={k} style={S.row}>
             <input type="checkbox" id={k} checked={layer[k]} onChange={e => setLayer({ ...layer, [k]: e.target.checked })} />
             <label htmlFor={k} style={{ fontSize: 11 }}>{{ colour: "colour map (stretched)", height: "heightmap (stretched)", trees: "trees", deploy: "deployment zones" }[k]}</label>
@@ -976,7 +987,7 @@ export default function MapEnlarger() {
             {selZone !== null && deploy.zones[selZone] && (() => { const z = deploy.zones[selZone]; return (
               <div style={{ fontSize: 11, background: "#1a2016", padding: 7, borderRadius: 3, marginBottom: 4 }}>
                 <div style={{ color: z.alliance === 0 ? "#6d9ee0" : "#e07d6d", marginBottom: 4 }}>alliance {z.alliance} zone</div>
-                {["x", "y", "w", "h"].map(k => (
+                {(["x", "y", "w", "h"] as const).map(k => (
                   <div key={k} style={S.row}>
                     <span style={{ width: 14 }}>{k}</span>
                     <input style={{ ...S.num, width: 80 }} type="number" value={z[k]}
@@ -988,8 +999,9 @@ export default function MapEnlarger() {
         </>}
 
         <label style={S.lbl}>Shader fix — grid.fx (once per install)</label>
+        {/* non-null files: a file input's change event always carries a FileList */}
         <input type="file" accept=".fx" style={{ fontSize: 11, width: "100%", color: "#b9b39a" }}
-          onChange={e => e.target.files[0] && patchGridFx(e.target.files[0])} />
+          onChange={e => e.target.files![0] && patchGridFx(e.target.files![0])} />
         {shaderMsg && <p style={{ fontSize: 10, color: "#c9b45f", lineHeight: 1.5, margin: "5px 0 0" }}>{shaderMsg}</p>}
         <p style={{ fontSize: 10, color: "#6d755f", lineHeight: 1.5, margin: "4px 0 0" }}>
           patches the UV divisor to ×{factor} — must match the terrain factor of
