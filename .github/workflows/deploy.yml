@@ -23,7 +23,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm install
 
       # project pages are served from a /<repo-name>/ sub-path, so assets need a matching base
       - run: npm run build -- --base=/${{ github.event.repository.name }}/
