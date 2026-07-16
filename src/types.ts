@@ -49,8 +49,12 @@ export interface Zone {
   alliance: number;
   /** the original <deployment_area>…</deployment_area> text */
   seg: string;
-  /** pre-batch-shift y; present only on batch-processed deployments */
+  /** pre-auto-shift centre; present only on batch-processed deployments */
+  x0?: number;
   y0?: number;
+  /** auto-shift vector last applied (x = x0 + sdx, y = y0 + sdy) */
+  sdx?: number;
+  sdy?: number;
 }
 
 /** Alternating raw-text / zone segments, discriminated on `raw`. */
@@ -102,7 +106,7 @@ export interface RemovedTree {
 
 export type UndoAction =
   | { type: "fill"; addedPer: number[] }
-  | { type: "zone-move"; zi: number; x: number; y: number; y0: number | undefined }
+  | { type: "zone-move"; zi: number; x: number; y: number; w: number; h: number; o: number; x0: number | undefined; y0: number | undefined }
   | { type: "tree-add"; si: number; n: number }
   | { type: "erase"; removed: RemovedTree[] };
 
@@ -131,7 +135,7 @@ export interface View {
  */
 export type DragState =
   | { panning: true; sx: number; sz: number; cx: number; cz: number; zone?: undefined; painting?: undefined }
-  | { zone: number; ox: number; oy: number; wx0: number; wz0: number; panning?: undefined; painting?: undefined }
+  | { zone: number; mode?: "resize" | "rotate"; ox: number; oy: number; wx0: number; wz0: number; panning?: undefined; painting?: undefined }
   | { painting: true; last: [number, number]; panning?: undefined; zone?: undefined };
 
 // ---------- styles ----------

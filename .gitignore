@@ -5,6 +5,9 @@ node_modules/
 dist/
 dist-ssr/
 
+# Test coverage
+coverage/
+
 # Local env files
 .env
 .env.local
@@ -29,3 +32,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code local config
+.claude/
