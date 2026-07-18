@@ -20,12 +20,16 @@ export async function loadZipStore(f: File | Blob | ArrayBuffer): Promise<{ stor
   for (const path of Object.keys(zip.files)) {
     if (zip.files[path].dir) continue;
     store.set(path, new Uint8Array(await zip.files[path].async("arraybuffer")));
-    if (path.endsWith("definition.xml")) defPath = path;
+    if (/definition\.xml$/i.test(path)) defPath = path;
   }
   if (!defPath) {
-    const alt = [...store.keys()].find(p => /(^|\/)(height_map_0_settings\.xml|deployment_areas\.xml|bmd\.tree_list)$/.test(p));
-    if (!alt) throw new Error("no definition.xml");
-    defPath = alt.slice(0, alt.lastIndexOf("/") + 1) + "definition.xml";
+    const paths = [...store.keys()];
+    if (!paths.length) throw new Error("empty zip");
+    // ponytail: no definition.xml — map root = deepest folder shared by every entry
+    let root = paths[0].slice(0, paths[0].lastIndexOf("/") + 1);
+    while (root && !paths.every(p => p.startsWith(root)))
+      root = root.slice(0, root.lastIndexOf("/", root.length - 2) + 1);
+    defPath = root + "definition.xml";
   }
   return { store, defPath };
 }
@@ -62,7 +66,7 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
   const extent = Math.round(width * factor);
   for (const [p, v] of store) {
     const name = inner ? p.slice(inner.length) : p;
-    if (name === "definition.xml") {
+    if (/^definition\.xml$/i.test(name)) {
       let x = new TextDecoder().decode(v);
       x = scaleAttr(x, "base_terrain_width", factor);
       x = scaleAttr(x, "base_terrain_height", factor);
