@@ -1,6 +1,9 @@
 import type JSZip from "jszip";
 import type { HeightMap } from "../types";
 
+/** Species dot palette, shared by the viewer, sidebar and thumbnails (index % length). */
+export const SP_COLORS = ["#7ec97e", "#5fb8b8", "#c9b45f", "#b88add", "#e08b6d", "#8fa9e0", "#d97fa6", "#a3c95f"];
+
 // ---------- DOM/canvas helpers (kept apart from pure logic for testability) ----------
 export function heightToCanvas(hm: HeightMap): HTMLCanvasElement {
   const cv = document.createElement("canvas");
@@ -26,8 +29,7 @@ export function sampleImage(img: CanvasImageSource, S: number): Uint8ClampedArra
   return cx.getImageData(0, 0, S, S).data;
 }
 
-export async function makeThumb(colourBytes: Uint8Array<ArrayBuffer> | null, treePts: number[][] | null, zoneRects: number[][] | null, extent: number): Promise<string> {
-  const S = 220;
+export async function makeThumb(colourBytes: Uint8Array<ArrayBuffer> | null, treePts: number[][] | null, zoneRects: number[][] | null, extent: number, S = 220): Promise<string> {
   const cv = document.createElement("canvas"); cv.width = S; cv.height = S;
   const ctx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
   ctx.fillStyle = "#1a2016"; ctx.fillRect(0, 0, S, S);
@@ -41,16 +43,22 @@ export async function makeThumb(colourBytes: Uint8Array<ArrayBuffer> | null, tre
   }
   const w2t = (x: number, z: number): [number, number] => [(x / extent + 0.5) * S, (z / extent + 0.5) * S];
   if (treePts) {
-    ctx.fillStyle = "#7ec97e";
+    // point = [x, z, speciesIdx?] — no idx falls back to colour 0, the old all-green look
     for (let i = 0; i < treePts.length; i += Math.max(1, (treePts.length / 2500) | 0)) {
+      ctx.fillStyle = SP_COLORS[(treePts[i][2] || 0) % SP_COLORS.length];
       const [px, pz] = w2t(treePts[i][0], treePts[i][1]);
       ctx.fillRect(px, pz, 1.2, 1.2);
     }
   }
-  if (zoneRects) for (const [x, y, w, h, al] of zoneRects) {
-    const [a, b] = w2t(x - w / 2, y - h / 2), [c, d] = w2t(x + w / 2, y + h / 2);
+  if (zoneRects) for (const [x, y, w, h, al, o] of zoneRects) {
+    const [cx, cz] = w2t(x, y);
+    const sw = (w / extent) * S, sh = (h / extent) * S;
     ctx.strokeStyle = al === 0 ? "#6d9ee0" : "#e07d6d"; ctx.lineWidth = 1;
-    ctx.strokeRect(a, b, c - a, d - b);
+    ctx.save();
+    ctx.translate(cx, cz);
+    ctx.rotate(o || 0);   // same screen convention as the viewer: +z down, rotate(o)
+    ctx.strokeRect(-sw / 2, -sh / 2, sw, sh);
+    ctx.restore();
   }
   ctx.strokeStyle = "#8a9a78"; ctx.strokeRect(0.5, 0.5, S - 1, S - 1);
   return cv.toDataURL("image/png");

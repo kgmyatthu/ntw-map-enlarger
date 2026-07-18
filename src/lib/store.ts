@@ -106,7 +106,7 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
         });
       }
       nTrees = tp.species.reduce((a, s) => a + s.trees.length, 0);
-      treePts = tp.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
+      treePts = tp.species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
       out.set(p, buildTreeList(tp));
     } else {
       if (/colour_map_0\.(jpg|jpeg|png)$/i.test(name)) colourBytes = v;

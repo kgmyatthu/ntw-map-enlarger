@@ -16,6 +16,7 @@ interface CtxStub {
     save: ReturnType<typeof vi.fn>;
     restore: ReturnType<typeof vi.fn>;
     translate: ReturnType<typeof vi.fn>;
+    rotate: ReturnType<typeof vi.fn>;
     scale: ReturnType<typeof vi.fn>;
     drawImage: ReturnType<typeof vi.fn>;
     putImageData: ReturnType<typeof vi.fn>;
@@ -44,6 +45,7 @@ function installCtxStub(): CtxStub {
     save: vi.fn(),
     restore: vi.fn(),
     translate: vi.fn(),
+    rotate: vi.fn(),
     scale: vi.fn(),
     drawImage: vi.fn(),
     putImageData: vi.fn(),
@@ -219,12 +221,19 @@ describe("makeThumb", () => {
     expect(fillStyles.filter(s => s === "#7ec97e").length).toBe(3);
   });
 
-  it("strokes zone rects in blue for alliance 0 and red otherwise, with correct geometry", async () => {
+  it("colours points by their species index; missing index falls back to colour 0", async () => {
+    const { fillStyles } = installCtxStub();
+    await makeThumb(null, [[0, 0, 0], [10, 10, 1], [-10, -10]], null, 1024);
+    // background fill + 3 tree fills
+    expect(fillStyles.slice(1)).toEqual(["#7ec97e", "#5fb8b8", "#7ec97e"]);
+  });
+
+  it("strokes zone rects in blue for alliance 0 and red otherwise, rotated about their centre", async () => {
     const { ctx, strokeStyles } = installCtxStub();
     const extent = 1024;
     const zones = [
-      [0, 0, 100, 50, 0],   // alliance 0
-      [10, 20, 80, 40, 1],  // alliance 1
+      [0, 0, 100, 50, 0],                 // alliance 0, unrotated
+      [10, 20, 80, 40, 1, Math.PI / 2],   // alliance 1, rotated 90°
     ];
     await makeThumb(null, null, zones, extent);
 
@@ -232,13 +241,20 @@ describe("makeThumb", () => {
     expect(ctx.strokeRect).toHaveBeenCalledTimes(3);
     expect(strokeStyles).toEqual(["#6d9ee0", "#e07d6d", "#8a9a78"]);
 
-    // geometry of the first zone: centre (0,0), 100x50, extent 1024, S=220
+    // zone 1: translate to its thumb centre, rotate 0, stroke centred on origin
     const S = 220;
+    expect(ctx.translate.mock.calls[0]).toEqual([(0 / extent + 0.5) * S, (0 / extent + 0.5) * S]);
+    expect(ctx.rotate.mock.calls[0][0]).toBe(0);
     const [a, b, w, h] = ctx.strokeRect.mock.calls[0];
-    expect(a).toBeCloseTo((-50 / extent + 0.5) * S);
-    expect(b).toBeCloseTo((-25 / extent + 0.5) * S);
+    expect(a).toBeCloseTo((-100 / 2 / extent) * S);
+    expect(b).toBeCloseTo((-50 / 2 / extent) * S);
     expect(w).toBeCloseTo((100 / extent) * S);
     expect(h).toBeCloseTo((50 / extent) * S);
+
+    // zone 2 rotates by its orientation
+    expect(ctx.rotate.mock.calls[1][0]).toBeCloseTo(Math.PI / 2);
+    expect(ctx.save).toHaveBeenCalledTimes(2);
+    expect(ctx.restore).toHaveBeenCalledTimes(2);
   });
 });
 

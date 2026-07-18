@@ -72,11 +72,24 @@ export function makeColourWeight(d: Uint8ClampedArray, S: number, mapSize: numbe
   };
 }
 
+/** No-plant mask from the map's ground_type_map_0 image (RGBA pixels, row 0 = top). */
+export function makeRoadMask(d: Uint8ClampedArray, w: number, h: number, mapSize: number) {
+  // ponytail: surveyed 656 vanilla+mod maps — roads/rivers are black, water pure
+  // blue, and every plantable ground type has R or G >= 68, so dark R+G = no-plant
+  return (wx: number, wz: number) => {
+    const u = wx / mapSize + 0.5, v = 1 - (wz / mapSize + 0.5);   // row 0 = +Z
+    const px = Math.min(w - 1, Math.max(0, (u * w) | 0)), py = Math.min(h - 1, Math.max(0, (v * h) | 0));
+    const i = (py * w + px) * 4;
+    return d[i] < 40 && d[i + 1] < 40;
+  };
+}
+
 /** Add up to target trees using the given algorithm; mutates species, returns per-species counts. */
 export function fillSpecies(
   species: Species[], target: number, mapSize: number, algo: FillAlgo,
   weightFn: ((wx: number, wz: number) => number) | null,
   rng: () => number = Math.random,
+  roadFn: ((wx: number, wz: number) => boolean) | null = null,
 ): { addedPer: number[]; added: number } {
   const counts = species.map(s => s.trees.length);
   const total = counts.reduce((a, b) => a + b, 0);
@@ -90,6 +103,23 @@ export function fillSpecies(
   const hash = new Map<string, boolean>();
   const hkey = (x: number, z: number) => ((x / cell) | 0) + ":" + ((z / cell) | 0);
   if (algo === "spaced") for (const [x, z] of all) hash.set(hkey(x, z), true);
+  // ponytail: reject fill points closer than MIN_D to any tree — NTW's 2d tree
+  // sprites visibly stack below this; the knob if forests look too tidy/messy
+  const MIN_D = 8;
+  const grid = new Map<string, number[][]>();
+  const gc = (v: number) => Math.floor(v / MIN_D);
+  const gput = (x: number, z: number) => {
+    const k = gc(x) + ":" + gc(z);
+    const b = grid.get(k);
+    b ? b.push([x, z]) : grid.set(k, [[x, z]]);
+  };
+  const gnear = (x: number, z: number) => {
+    for (let i = gc(x) - 1; i <= gc(x) + 1; i++) for (let j = gc(z) - 1; j <= gc(z) + 1; j++)
+      for (const [px, pz] of grid.get(i + ":" + j) ?? [])
+        if ((px - x) * (px - x) + (pz - z) * (pz - z) < MIN_D * MIN_D) return true;
+    return false;
+  };
+  for (const [x, z] of all) gput(x, z);
   const addedPer = species.map(() => 0);
   let added = 0, tries = 0;
   if (algo === "cluster" && !all.length) return { addedPer, added };   // nothing inside to grow from
@@ -106,6 +136,8 @@ export function fillSpecies(
     if (Math.abs(wx) > half || Math.abs(wz) > half) continue;
     if (algo === "colour" && weightFn && rng() > weightFn(wx, wz)) continue;
     if (algo === "spaced" && hash.has(hkey(wx, wz))) continue;
+    if (roadFn && roadFn(wx, wz)) continue;
+    if (gnear(wx, wz)) continue;
     let r = rng() * total, si = 0;
     for (; si < counts.length; si++) { r -= counts[si]; if (r <= 0) break; }
     si = Math.min(si, counts.length - 1);
@@ -114,6 +146,7 @@ export function fillSpecies(
     const proto = s.trees[(rng() * s.trees.length) | 0];
     const nt = { x: Math.round(wx * 10) / 10, z: Math.round(wz * 10) / 10, extra: proto.extra, isNew: true };
     s.trees.push(nt);
+    gput(wx, wz);
     if (algo === "spaced") hash.set(hkey(wx, wz), true);
     if (algo === "cluster") all.push([wx, wz]);
     addedPer[si]++; added++;

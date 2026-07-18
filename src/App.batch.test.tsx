@@ -71,6 +71,20 @@ it("processes a single zip: grid tile, auto-filled species counts, tile click re
   await screen.findByText(loadedStatus);
 });
 
+it("selected map shows the original view panel beside the enlarged viewer", async () => {
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+
+  expect(screen.getByText("Original — 1024 m")).toBeTruthy();
+  expect((screen.getByAltText("original map") as HTMLImageElement).src).toMatch(/^data:image\/png/);
+
+  // file explorer lists the bundle's files with sizes
+  expect(screen.getByText(/Files — \d+/)).toBeTruthy();
+  expect(screen.getByText("deployment_areas.xml")).toBeTruthy();
+  expect(screen.getByText("bmd.tree_list")).toBeTruthy();
+});
+
 it("corrupt zip: ✗ log entry and 'Batch: no maps processed.'", async () => {
   const { container } = render(<App />);
   const bad = new File([new Uint8Array([1, 2, 3])], "bad.zip");

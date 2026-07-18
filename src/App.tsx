@@ -6,12 +6,12 @@ import type {
   LayerState, Entity, View, DragState, Styles,
 } from "./types";
 import { parseTreeList, buildTreeList } from "./lib/treeList";
-import { readDDS } from "./lib/dds";
+import { readDDS, readTGA } from "./lib/dds";
 import { parseDeployment, serializeDeployment, autoShiftZones, zonesOverlap, zoneInBounds } from "./lib/deployment";
 import { setScale, baseTerrainWidth, worldWidth, patchGridFx } from "./lib/xml";
-import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, fillSpecies } from "./lib/edit";
+import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, makeRoadMask, fillSpecies } from "./lib/edit";
 import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "./lib/store";
-import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir, pickExportDir } from "./lib/canvas";
+import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir, pickExportDir, SP_COLORS } from "./lib/canvas";
 
 // =====================================================================
 // NTW CUSTOM MAP ENLARGER
@@ -22,14 +22,16 @@ import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir
 // tree lists, 83 building lists round-tripped).
 // =====================================================================
 
-const SP_COLORS = ["#7ec97e", "#5fb8b8", "#c9b45f", "#b88add", "#e08b6d", "#8fa9e0", "#d97fa6", "#a3c95f"];
 const FILL_INTENSITY = 0.5;   // ponytail: auto-fill adds this fraction of full original density; tune here
+// liberal: matches ground_type_map_0 / groud_type_map0 spellings, any extension casing
+const GT_RE = /groun?d_?type_?map_?\d*\.(tga|jpg|jpeg|png)$/i;
 const ROT_KNOB = 22;   // px from the zone's top edge to the rotate knob
 
 export default function MapEnlarger() {
   const [files, setFiles] = useState<FileStore | null>(null);
   const [mapName, setMapName] = useState("");
   const [colourImg, setColourImg] = useState<HTMLImageElement | null>(null);
+  const [alphaImg, setAlphaImg] = useState<HTMLImageElement | HTMLCanvasElement | null>(null);
   const [hmCanvas, setHmCanvas] = useState<HTMLCanvasElement | null>(null);
   const [trees, setTrees] = useState<LoadedTreeList | null>(null);
   const [deploy, setDeploy] = useState<LoadedDeployment | null>(null);
@@ -48,7 +50,7 @@ export default function MapEnlarger() {
   const [curBundle, setCurBundle] = useState<number | null>(null);
   const [fillAlgo, setFillAlgo] = useState<FillAlgo>("cluster");
   const [fillN, setFillN] = useState("");
-  const [layer, setLayer] = useState<LayerState>({ colour: true, height: true, trees: true, deploy: true });
+  const [layer, setLayer] = useState<LayerState>({ colour: true, alpha: false, height: true, trees: true, deploy: true });
   const [tool, setTool] = useState<Tool>("pan");
   const [entity, setEntity] = useState<Entity>({ kind: "tree", idx: 0 });
   const [brushR, setBrushR] = useState(60);
@@ -94,6 +96,26 @@ export default function MapEnlarger() {
       im.src = URL.createObjectURL(new Blob([ci.v]));
     } else setColourImg(null);
 
+    let gtNote = " · no ground_type_map";
+    const aKey = [...store.keys()].find(p => GT_RE.test(p));
+    if (aKey && /\.tga$/i.test(aKey)) {
+      try {
+        const t = readTGA(store.get(aKey)!);
+        const cv = document.createElement("canvas"); cv.width = t.w; cv.height = t.h;
+        const c = cv.getContext("2d")!; // fresh canvas: 2d context is always available
+        const im = c.createImageData(t.w, t.h);
+        im.data.set(t.data);
+        c.putImageData(im, 0, 0);
+        setAlphaImg(cv);
+        gtNote = ` · ground-type ${t.w}×${t.h} ✓`;
+      } catch (e) { gtNote = ` · ground-type FAILED: ${(e as Error).message}`; setAlphaImg(null); }
+    } else if (aKey) {
+      const im = new Image();
+      im.onload = () => { setAlphaImg(im); rr(); };
+      im.src = URL.createObjectURL(new Blob([store.get(aKey)!]));
+      gtNote = " · ground-type ✓";
+    } else setAlphaImg(null);
+
     let hm = get("height_map_0.dds");
     if (hm) setHmCanvas(heightToCanvas(readDDS(hm.v.buffer.slice(hm.v.byteOffset, hm.v.byteOffset + hm.v.byteLength))));
     else {
@@ -124,7 +146,7 @@ export default function MapEnlarger() {
     setEnlarged(!!processedFactor);
     setAppliedF(processedFactor || 1);
     undoRef.current = [];
-    setStatus(`Loaded ${store.size} files, base terrain ${bs} m. ${tl ? "trees ✓" : "no trees"}${dpf ? ", deployment ✓" : ""}.`);
+    setStatus(`Loaded ${store.size} files, base terrain ${bs} m. ${tl ? "trees ✓" : "no trees"}${dpf ? ", deployment ✓" : ""}.${gtNote}`);
   };
 
   const applyScale = (v: string) => {
@@ -180,14 +202,36 @@ export default function MapEnlarger() {
     return makeColourWeight(sampleImage(colourImg, S), S, mapSize);
   };
 
-  const fillTrees = () => {
+  // roads live in the paletted ground_type_map image (black pixels) — never plant on them.
+  // Returns the reason alongside so failures surface in the UI instead of vanishing.
+  const roadFromStore = async (st: FileStore, extent: number): Promise<{ road: ((wx: number, wz: number) => boolean) | null; note: string }> => {
+    const key = [...st.keys()].find(p => GT_RE.test(p));
+    if (!key) return { road: null, note: "no ground_type_map" };
+    if (/\.tga$/i.test(key)) {
+      try {
+        const t = readTGA(st.get(key)!);
+        return { road: makeRoadMask(t.data, t.w, t.h, extent), note: `road mask ✓ ${t.w}×${t.h}` };
+      } catch (e) { return { road: null, note: `road mask FAILED: ${(e as Error).message}` }; }
+    }
+    const img = await new Promise<HTMLImageElement | null>(res => {
+      const im = new Image();
+      im.onload = () => res(im); im.onerror = () => res(null);
+      im.src = URL.createObjectURL(new Blob([st.get(key)!]));
+    });
+    if (!img) return { road: null, note: "road mask FAILED: image decode" };
+    const S = img.width || 1024;   // native resolution: the road image's own pixels, no resample
+    return { road: makeRoadMask(sampleImage(img, S), S, S, extent), note: `road mask ✓ ${S}×${S}` };
+  };
+
+  const fillTrees = async () => {
     if (!trees) return;
     const total = trees.species.reduce((a, s) => a + s.trees.length, 0);
     if (!total) { setStatus("No existing trees to base fill on."); return; }
     const suggested = Math.round(total * (appliedF * appliedF - 1) * FILL_INTENSITY);
     const target = Math.min(parseInt(fillN) > 0 ? parseInt(fillN) : Math.max(suggested, 0), 45000 - total);
     if (target <= 0) { setStatus("Nothing to add (target 0)."); return; }
-    const { addedPer, added } = fillSpecies(trees.species, target, mapSize, fillAlgo, fillAlgo === "colour" ? colourWeightFn() : null);
+    const { road } = files ? await roadFromStore(files, mapSize) : { road: null };
+    const { addedPer, added } = fillSpecies(trees.species, target, mapSize, fillAlgo, fillAlgo === "colour" ? colourWeightFn() : null, Math.random, road);
     undoRef.current.push({ type: "fill", addedPer });
     refreshCurThumb();
     setStatus(`Added ${added} trees (${fillAlgo}${added < target ? ", hit sampling limit" : ""}); undo removes them.`);
@@ -197,8 +241,8 @@ export default function MapEnlarger() {
   const refreshCurThumb = async () => {
     if (curBundle === null || !bundles[curBundle] || !trees) return;
     const b = bundles[curBundle];
-    const pts = trees.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
-    b.thumb = await makeThumb(b.colourBytes, pts, b.dep ? b.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance]) : null, b.extent);
+    const pts = trees.species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
+    b.thumb = await makeThumb(b.colourBytes, pts, b.dep ? b.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance, z.o]) : null, b.extent);
     setBundles(bundles.slice());
   };
 
@@ -283,10 +327,10 @@ export default function MapEnlarger() {
           try {
             const v = b.store.get(tKey)!;
             const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
-            pts = tp.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
+            pts = tp.species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
           } catch (e) { /* keep old thumb trees */ }
         }
-        b.thumb = await makeThumb(b.colourBytes, pts, b.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance]), b.extent);
+        b.thumb = await makeThumb(b.colourBytes, pts, b.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance, z.o]), b.extent);
       }
       setBundles(bundles.slice());
     }, 400);
@@ -312,26 +356,41 @@ export default function MapEnlarger() {
             if (/height_map_\d_settings\.xml$/.test(p)) r.out.set(p, enc.encode(setScale(dec.decode(r.out.get(p)!), scaleSet)));
           }
         }
-        let auto = 0;
+        let auto = 0, roadNote = "";
         const tKey = [...r.out.keys()].find(p => p.endsWith("bmd.tree_list"));
         if (fillN.trim() !== "0" && tKey && r.nTrees) {   // ponytail: fill box "0" = skip auto-fill
           const v = r.out.get(tKey)!;
           const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
           const target = Math.min(Math.round(r.nTrees * (fac * fac - 1) * FILL_INTENSITY), 45000 - r.nTrees);
           if (target > 0) {
-            auto = fillSpecies(tp.species, target, r.extent, "cluster", null).added;
+            const rd = await roadFromStore(r.out, r.extent);
+            roadNote = rd.note;
+            auto = fillSpecies(tp.species, target, r.extent, "cluster", null, Math.random, rd.road).added;
             r.out.set(tKey, buildTreeList(tp));
             r.nTrees += auto;
-            r.treePts = tp.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
+            r.treePts = tp.species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
           }
         }
-        const thumb = await makeThumb(r.colourBytes, r.treePts, r.dep ? r.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance]) : null, r.extent);
+        const thumb = await makeThumb(r.colourBytes, r.treePts, r.dep ? r.dep.zones.filter(z => z.block === 0).map(z => [z.x, z.y, z.w, z.h, z.alliance, z.o]) : null, r.extent);
+        // original side panel: re-parse the untouched tree list so even culled oob trees show
+        let origPts: number[][] | null = null;
+        const oKey = [...store.keys()].find(p => p.endsWith("bmd.tree_list"));
+        if (oKey && store.get(oKey)!.length > 40) {
+          try {
+            const ov = store.get(oKey)!;
+            origPts = parseTreeList(ov.buffer.slice(ov.byteOffset, ov.byteOffset + ov.byteLength))
+              .species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
+          } catch (e) { /* panel just shows no trees */ }
+        }
+        const origThumb = await makeThumb(r.colourBytes, origPts,
+          r.dep ? r.dep.zones.filter(z => z.block === 0).map(z => [z.x0 ?? z.x, z.y0 ?? z.y, z.w, z.h, z.alliance, z.o]) : null,
+          r.extent / fac, 512);
         newBundles.push({
-          name: f.name.replace(/\.zip$/i, ""), store: r.out, root: r.root, factor: fac, exported: false,
+          name: f.name.replace(/\.zip$/i, ""), store: r.out, origThumb, root: r.root, factor: fac, exported: false,
           thumb, nTrees: r.nTrees, nZones: r.nZones, dep: r.dep, depPath: r.depPath,
           colourBytes: r.colourBytes, extent: r.extent, origScale: r.origScale, scaleSet,
         });
-        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto${r.cull ? `, ${r.cull} oob culled` : ""}), ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}`);
+        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto${r.cull ? `, ${r.cull} oob culled` : ""}), ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}${roadNote ? ", " + roadNote : ""}`);
       } catch (e) {
         // cast: everything thrown here (JSZip failures, our own throws) is an Error
         log.push(`✗ ${f.name}: ${(e as Error).message}`);
@@ -411,6 +470,13 @@ export default function MapEnlarger() {
       drawFlipped(colourImg, a, b, c, d);
       ctx.globalAlpha = 1;
     }
+    if (layer.alpha && alphaImg) {
+      // road/alpha map overlay — what the auto-fill road mask sees
+      const [a, b] = w2sc(-half, -half, cw, ch), [c, d] = w2sc(half, half, cw, ch);
+      ctx.globalAlpha = 0.55;
+      drawFlipped(alphaImg, a, b, c, d);
+      ctx.globalAlpha = 1;
+    }
     const box = (hx: number, color: string, dash: number[], label: string) => {
       const [a, b] = w2sc(-hx, -hx, cw, ch), [c, d] = w2sc(hx, hx, cw, ch);
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash(dash);
@@ -467,7 +533,7 @@ export default function MapEnlarger() {
       ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(sx, sz, rr2, 0, 6.283); ctx.stroke(); ctx.setLineDash([]);
     }
-  }, [files, colourImg, hmCanvas, trees, deploy, blockIdx, selZone, enlarged, mapSize, imgExtent, layer, tool, brushR]);
+  }, [files, colourImg, alphaImg, hmCanvas, trees, deploy, blockIdx, selZone, enlarged, mapSize, imgExtent, layer, tool, brushR]);
 
   useEffect(() => { draw(); });
   useEffect(() => {
@@ -693,10 +759,10 @@ export default function MapEnlarger() {
           )}
 
         <label style={S.lbl}>Layers</label>
-        {(["colour", "height", "trees", "deploy"] as const).map(k => (
+        {(["colour", "alpha", "height", "trees", "deploy"] as const).map(k => (
           <div key={k} style={S.row}>
             <input type="checkbox" id={k} checked={layer[k]} onChange={e => setLayer({ ...layer, [k]: e.target.checked })} />
-            <label htmlFor={k} style={{ fontSize: 11 }}>{{ colour: "colour map (stretched)", height: "heightmap (stretched)", trees: "trees", deploy: "deployment zones" }[k]}</label>
+            <label htmlFor={k} style={{ fontSize: 11 }}>{{ colour: "colour map (stretched)", alpha: "ground type map (roads)", height: "heightmap (stretched)", trees: "trees", deploy: "deployment zones" }[k]}</label>
           </div>
         ))}
         {deploy && (() => {
@@ -772,6 +838,23 @@ export default function MapEnlarger() {
         </p>
       </div>
 
+      {curBundle !== null && bundles[curBundle] && (
+        <div style={{ width: 440, borderRight: "1px solid #2b3226", padding: 10, flexShrink: 0, overflowY: "auto" }}>
+          <label style={S.lbl}>Original — {Math.round(bundles[curBundle].extent / bundles[curBundle].factor)} m</label>
+          <img src={bundles[curBundle].origThumb} style={{ width: "100%", borderRadius: 3 }} alt="original map" />
+          <p style={{ fontSize: 10, color: "#6d755f", lineHeight: 1.4 }}>
+            untouched import: original size, all original tree positions,
+            deployment zones. The viewer on the right is the enlarged result.
+          </p>
+          <label style={S.lbl}>Files — {bundles[curBundle].store.size}</label>
+          {[...bundles[curBundle].store.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([p, v]) => (
+            <div key={p} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, padding: "2px 0", borderBottom: "1px solid #1c2318", color: "#b9b39a" }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{bundles[curBundle].root ? p.slice(bundles[curBundle].root.length) : p}</span>
+              <span style={{ color: "#6d755f", flexShrink: 0, marginLeft: 8 }}>{v.length >= 1048576 ? (v.length / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(v.length / 1024)) + " KB"}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {/* minWidth 0: without it the canvas's pixel width blocks this pane from
           shrinking, pushing the grid panel past the viewport */}
       <div style={{ flex: 1, position: "relative", minWidth: 0, overflow: "hidden" }}>

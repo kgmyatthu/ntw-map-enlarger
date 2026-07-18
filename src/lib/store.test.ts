@@ -182,7 +182,7 @@ describe("enlargeStore at factor 2 (full map)", () => {
 
   it("scales tree coords by factor, counts trees, returns treePts", () => {
     expect(r.nTrees).toBe(3);
-    expect(r.treePts).toEqual([[200, -100], [40, 60], [-160, 120]]);
+    expect(r.treePts).toEqual([[200, -100, 0], [40, 60, 0], [-160, 120, 1]]);
     const rebuilt = parseTreeList(r.out.get("mymap/bmd.tree_list")!.buffer);
     expect(rebuilt.species.map(s => s.trees.map(t => [t.x, t.z]))).toEqual([
       [[200, -100], [40, 60]],
@@ -221,7 +221,7 @@ describe("enlargeStore at factor 1.5", () => {
   });
 
   it("scales tree coords by 1.5", () => {
-    expect(r.treePts).toEqual([[150, -75], [30, 45], [-120, 90]]);
+    expect(r.treePts).toEqual([[150, -75, 0], [30, 45, 0], [-120, 90, 1]]);
     expect(r.nTrees).toBe(3);
   });
 

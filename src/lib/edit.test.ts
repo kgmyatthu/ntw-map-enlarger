@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo,
-  makeColourWeight, fillSpecies,
+  makeColourWeight, makeRoadMask, fillSpecies,
 } from "./edit";
 import type { Species, Tree, Zone, TreeList, Deployment, View } from "../types";
 
@@ -319,6 +319,24 @@ describe("makeColourWeight", () => {
   });
 });
 
+// ---------- makeRoadMask ----------
+
+describe("makeRoadMask", () => {
+  it("no-plant = dark R+G (black road, blue water); grass greens stay plantable", () => {
+    const S = 4, mapSize = 1000;
+    const d = new Uint8ClampedArray(S * S * 4);
+    for (let i = 0; i < S * S; i++) d[i * 4 + 1] = 255;   // all grass (0,255,0)
+    d[1] = 0;                                             // pixel (0,0) black road (top-left = -x, +z)
+    d[3 * 4 + 1] = 0; d[3 * 4 + 2] = 255;                 // pixel (3,0) blue water (+x, +z)
+    d[(3 * S) * 4 + 1] = 68;                              // pixel (0,3) darkest real grass (0,68,0) (-x, -z)
+    const road = makeRoadMask(d, S, S, mapSize);
+    expect(road(-499, 499)).toBe(true);    // road
+    expect(road(499, 499)).toBe(true);     // water
+    expect(road(0, 0)).toBe(false);        // grass
+    expect(road(-499, -499)).toBe(false);  // dark grass variant, still plantable
+  });
+});
+
 // ---------- fillSpecies ----------
 
 describe("fillSpecies", () => {
@@ -419,17 +437,37 @@ describe("fillSpecies", () => {
     expect(res.added).toBe(5);
   });
 
+  it("never places a fill point where roadFn says road", () => {
+    const species = [sp("pine", [tree(-100, 0, 1)])];
+    const res = fillSpecies(species, 15, mapSize, "uniform", null, lcg(3), (wx) => wx > 0);
+    expect(res.added).toBeGreaterThan(0);
+    for (const t of species[0].trees.filter(t => t.isNew)) expect(t.x).toBeLessThanOrEqual(0);
+  });
+
+  it("keeps every fill point at least 8 m from existing and placed trees", () => {
+    const species = [sp("pine", [tree(0, 0, 1), tree(50, 50, 2)])];
+    const res = fillSpecies(species, 30, mapSize, "cluster", null, lcg(9));
+    expect(res.added).toBeGreaterThan(0);
+    const pts = species[0].trees.map(t => [t.x, t.z]);
+    for (let a = 0; a < pts.length; a++) for (let b = a + 1; b < pts.length; b++) {
+      if (!species[0].trees[a].isNew && !species[0].trees[b].isNew) continue;   // originals may pre-overlap
+      // 0.2 slack: coords are rounded to 0.1 m after the spacing check
+      expect(Math.hypot(pts[a][0] - pts[b][0], pts[a][1] - pts[b][1])).toBeGreaterThanOrEqual(8 - 0.2);
+    }
+  });
+
   it("never adds to an empty species: selection hitting it is skipped", () => {
     const donor = tree(0, 0, 9);
     const species = [sp("empty1", []), sp("fulltree", [donor])];
-    // per attempt (uniform): rng -> wx, rng -> wz, rng -> species pick, rng -> proto.
-    // A species pick of 0 selects si=0 (r = 0 <= 0), which is empty -> continue.
-    const rng = seq([0.5, 0.5, 0 /* picks empty si=0 */, 0.5, 0.5, 0.5, 0.5 /* picks si=1 */]);
-    const res = fillSpecies(species, 2, mapSize, "uniform", null, rng);
-    expect(res.added).toBe(2);
-    expect(res.addedPer).toEqual([0, 2]);
+    // per attempt (uniform): rng -> wx, rng -> wz, [min-dist check, no rng], species pick, proto.
+    // Attempt 1 at (352,352): species pick 0 selects empty si=0 -> continue.
+    // Attempt 2 at (176,176): pick 0.5 -> si=1 -> places.
+    const rng = seq([0.9, 0.9, 0 /* picks empty si=0 */, 0.7, 0.7, 0.5, 0.5 /* picks si=1 */]);
+    const res = fillSpecies(species, 1, mapSize, "uniform", null, rng);
+    expect(res.added).toBe(1);
+    expect(res.addedPer).toEqual([0, 1]);
     expect(species[0].trees).toHaveLength(0);
-    expect(species[1].trees).toHaveLength(3);
+    expect(species[1].trees).toHaveLength(2);
     expect(species[1].trees[1].extra).toBe(donor.extra);
     expect(species[1].trees[1].isNew).toBe(true);
   });

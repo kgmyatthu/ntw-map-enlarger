@@ -81,6 +81,8 @@ export type FileStore = Map<string, Uint8Array<ArrayBuffer>>;
 export interface Bundle {
   name: string;
   store: FileStore;
+  /** PNG data URL of the untouched import (original size/trees/zones), for the side-by-side panel */
+  origThumb: string;
   root: string;
   factor: 1.5 | 2;
   exported: boolean;
@@ -113,7 +115,7 @@ export type UndoAction =
 // ---------- UI literal unions ----------
 export type Tool = "pan" | "place" | "brush" | "erase" | "zones";
 export type FillAlgo = "cluster" | "colour" | "uniform" | "spaced";
-export type LayerKey = "colour" | "height" | "trees" | "deploy";
+export type LayerKey = "colour" | "alpha" | "height" | "trees" | "deploy";
 export type LayerState = Record<LayerKey, boolean>;
 export type ZoneField = "x" | "y" | "w" | "h";
 
