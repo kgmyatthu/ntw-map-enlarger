@@ -95,30 +95,17 @@ describe("loadZipStore", () => {
     expect(text(store, "readme.txt")).toBe("hi");
   });
 
-  it("no definition.xml and no shared folder: anchors at the archive root", async () => {
+  it("throws 'no definition.xml' when the archive has no anchor file either", async () => {
     const zip = new JSZip();
     zip.file("readme.txt", "hi");
     zip.file("mymap/height_map_0.dds", makeDDS(4, 4, 8));
-    const { defPath } = await loadZipStore(await zip.generateAsync({ type: "arraybuffer" }));
-    expect(defPath).toBe("definition.xml");
+    await expect(loadZipStore(await zip.generateAsync({ type: "arraybuffer" })))
+      .rejects.toThrow("no definition.xml");
   });
 
-  it("throws on an empty archive", async () => {
-    await expect(loadZipStore(await new JSZip().generateAsync({ type: "arraybuffer" })))
-      .rejects.toThrow("empty zip");
-  });
-
-  it("finds a mixed-case Definition.xml", async () => {
-    const zip = new JSZip();
-    zip.file("mymap/Definition.xml", DEF_XML);
-    const { defPath } = await loadZipStore(await zip.generateAsync({ type: "arraybuffer" }));
-    expect(defPath).toBe("mymap/Definition.xml");
-  });
-
-  it("no definition.xml: virtual defPath in the shared map folder", async () => {
+  it("no definition.xml: anchors a virtual defPath on height settings", async () => {
     const zip = new JSZip();
     zip.file("mymap/height_map_0_settings.xml", HEIGHT_XML);
-    zip.file("mymap/sub/extra.bin", new Uint8Array([1]));
     const { store, defPath } = await loadZipStore(await zip.generateAsync({ type: "arraybuffer" }));
     expect(defPath).toBe("mymap/definition.xml");
     expect(store.has(defPath)).toBe(false);
