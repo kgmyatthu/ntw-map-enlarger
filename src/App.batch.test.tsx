@@ -49,8 +49,8 @@ it("processes a single zip: grid tile, auto-filled species counts, tile click re
 
   await screen.findByText(/Batch processed 1\/1 maps/);
 
-  // grid tile badge: 3 fixture trees + 9 auto-cluster (suggested = 3·(2²−1))
-  expect(screen.getByText("12t")).toBeTruthy();
+  // grid tile badge: 3 fixture trees + 5 auto-cluster (suggested = 3·(2²−1)·0.5)
+  expect(screen.getByText("8t")).toBeTruthy();
   // auto-view: sidebar title shows the map name with [i/n]
   expect(screen.getByText("mymap [1/1]")).toBeTruthy();
 
@@ -58,7 +58,7 @@ it("processes a single zip: grid tile, auto-filled species counts, tile click re
   const n = (s: string) => Number(screen.getByText(s).parentElement!.textContent!.slice(s.length));
   expect(n("pine")).toBeGreaterThanOrEqual(2);
   expect(n("oaktree")).toBeGreaterThanOrEqual(1);
-  expect(n("pine") + n("oaktree")).toBe(12);
+  expect(n("pine") + n("oaktree")).toBe(8);
 
   // deployment loaded: block selector shows 1v1 for block 1 (fixture block 0)
   expect(screen.getByText("1: 1v1")).toBeTruthy();
@@ -97,10 +97,10 @@ it("mixed good+bad batch: ✓ log line with counts + scale note, then 'Batch pro
 
   // the log is only rendered while no bundles exist; catch it while file 2 fails
   // largest group push: block-1 zone rides its centroid ray until y binds (t≈434)
-  await screen.findByText(/✓ mymap\.zip: ×2, 12 trees \(9 auto\), 3 zones \+434m, scale 0\.600000→1\.200000/, undefined, { timeout: 4000 });
+  await screen.findByText(/✓ mymap\.zip: ×2, 8 trees \(5 auto\), 3 zones \+434m, scale 0\.600000→1\.200000/, undefined, { timeout: 4000 });
 
   await screen.findByText(/Batch processed 1\/2 maps/);
-  expect(screen.getByText("12t")).toBeTruthy();
+  expect(screen.getByText("8t")).toBeTruthy();
   expect(screen.getByText("mymap [1/1]")).toBeTruthy(); // 1 bundle survived
 });
 
@@ -125,7 +125,7 @@ it("export ALL dedups duplicate internal roots (_2 suffix) and marks all bundles
   expect(paths.filter(p => p.startsWith("mymap_2/")).length).toBe(paths.filter(p => p.startsWith("mymap/")).length);
 
   // both grid tiles flipped from tree-count badge to exported
-  expect(screen.queryByText("12t")).toBeNull();
+  expect(screen.queryByText("8t")).toBeNull();
   expect(screen.getAllByText("exported").length).toBeGreaterThanOrEqual(2);
 });
 
@@ -139,7 +139,7 @@ it("'Export current map zip' exports with enlarged size in the name and marks th
 
   // mapName "mymap [1/1]" -> "mymap", enlarged 1024*2 -> mymap_2048.zip
   expect(downloads).toContain("mymap_2048.zip");
-  expect(screen.queryByText("12t")).toBeNull();
+  expect(screen.queryByText("8t")).toBeNull();
   expect(screen.getAllByText("exported").length).toBeGreaterThanOrEqual(1);
 });
 
@@ -151,7 +151,7 @@ it("grid panel is always visible; clicking a tile views that bundle (syncs the p
   await screen.findByText(/Batch processed 2\/2 maps/);
 
   // one tree-count badge per tile, no toggle needed
-  expect(screen.getAllByText("12t")).toHaveLength(2);
+  expect(screen.getAllByText("8t")).toHaveLength(2);
   expect(screen.getByText("alpha [1/2]")).toBeTruthy(); // first bundle auto-viewed
 
   // clicking the second tile calls viewBundle(1): first bundle is synced back, no crash
@@ -159,7 +159,7 @@ it("grid panel is always visible; clicking a tile views that bundle (syncs the p
   await screen.findByText("beta [2/2]");
   await screen.findByText(loadedStatus);
   // grid stays visible after picking a tile
-  expect(screen.getAllByText("12t")).toHaveLength(2);
+  expect(screen.getAllByText("8t")).toHaveLength(2);
 });
 
 it("headroom change re-shifts all maps live and regenerates thumbnails", async () => {
@@ -229,19 +229,19 @@ it("factor switch after import re-processes the batch: fill target + height scal
   const { container } = render(<App />);
   fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
   await screen.findByText(/Batch processed 1\/1 maps/);
-  expect(screen.getByText("12t")).toBeTruthy();   // ×2: 3 base + 9 auto
+  expect(screen.getByText("8t")).toBeTruthy();   // ×2: 3 base + 5 auto
 
   // labels recomputed from the loaded base size 1024
   fireEvent.click(screen.getByText(/×1\.5 → 1536/));
 
-  // ×1.5: auto fill 3·(1.5²−1) = 4 -> 7 trees, auto scale 0.6·1.5
-  await screen.findByText("7t");
+  // ×1.5: auto fill round(3·(1.5²−1)·0.5) = 2 -> 5 trees, auto scale 0.6·1.5
+  await screen.findByText("5t");
   expect((screen.getByPlaceholderText("keep") as HTMLInputElement).value).toBe("0.900000");
   expect(screen.getByText("mymap [1/1]")).toBeTruthy();
   expect(screen.getByText(/patches the UV divisor to ×1\.5/)).toBeTruthy();
 
   // and back to ×2
   fireEvent.click(screen.getByText(/×2 → 2048/));
-  await screen.findByText("12t");
+  await screen.findByText("8t");
   expect((screen.getByPlaceholderText("keep") as HTMLInputElement).value).toBe("1.200000");
 });

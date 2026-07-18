@@ -4,7 +4,7 @@ import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "
 import { parseTreeList, buildTreeList } from "./treeList";
 import { parseDeployment, serializeDeployment } from "./deployment";
 import type { FileStore, LoadedDeployment, LoadedTreeList } from "../types";
-import { DEF_XML, HEIGHT_XML, DEPLOY_XML, defaultTreeListBuf, makeDDS, makeMapZip } from "../test/fixtures";
+import { DEF_XML, HEIGHT_XML, DEPLOY_XML, defaultTreeListBuf, buildTreeListBuf, makeDDS, makeMapZip } from "../test/fixtures";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -315,6 +315,40 @@ describe("enlargeStore edge cases", () => {
     expect(text(r.out, "height_map_0_settings.xml")).toContain("world_width='2048.000000'");
     expect(r.origScale).toBe("0.600000");
     expect(r.colourBytes).toBe(img);
+  });
+
+  it("culls 60% of trees beyond the playable square, keeps inside trees untouched", () => {
+    // base 1024 ×2 -> playable ±1024; x=2000 scales to 4000 (out), x=10 to 20 (in)
+    const far = { x: 2000, z: 0 };
+    const buf = buildTreeListBuf([{ name: "pine", trees: [{ x: 10, z: 10 }, far, far, far, far, far] }]);
+    const store = makeStore({ "m/definition.xml": DEF_XML, "m/bmd.tree_list": buf });
+    const r = enlargeStore(store, "m/definition.xml", 2, 100);
+    expect(r.cull).toBe(3);      // keep-rate 0.4 -> 2 of the 5 oob survive
+    expect(r.nTrees).toBe(3);    // 1 inside + 2 of the 5 outside
+    const kept = parseTreeList(r.out.get("m/bmd.tree_list")!.buffer as ArrayBuffer).species[0].trees;
+    expect(kept.map(t => t.x)).toEqual([20, 4000, 4000]);
+  });
+
+  it("ramps the oob cull to 90% when the projected post-fill count reaches 30k", () => {
+    // 7500 inside × 2² = 30000 projected -> keep-rate drops to 0.1
+    const inTrees = Array.from({ length: 7500 }, (_, i) => ({ x: (i % 100) - 50, z: Math.floor(i / 100) - 37 }));
+    const far = Array.from({ length: 10 }, () => ({ x: 2000, z: 0 }));
+    const buf = buildTreeListBuf([{ name: "pine", trees: [...inTrees, ...far] }]);
+    const store = makeStore({ "m/definition.xml": DEF_XML, "m/bmd.tree_list": buf });
+    const r = enlargeStore(store, "m/definition.xml", 2, 100);
+    expect(r.cull).toBe(9);          // 1 of 10 oob survives at 90%
+    expect(r.nTrees).toBe(7501);
+  });
+
+  it("culls 100% of oob trees when the projected count reaches 35k", () => {
+    // 8750 inside × 2² = 35000 projected -> keep-rate 0
+    const inTrees = Array.from({ length: 8750 }, (_, i) => ({ x: (i % 100) - 50, z: Math.floor(i / 100) - 43 }));
+    const far = Array.from({ length: 5 }, () => ({ x: 2000, z: 0 }));
+    const buf = buildTreeListBuf([{ name: "pine", trees: [...inTrees, ...far] }]);
+    const store = makeStore({ "m/definition.xml": DEF_XML, "m/bmd.tree_list": buf });
+    const r = enlargeStore(store, "m/definition.xml", 2, 100);
+    expect(r.cull).toBe(5);
+    expect(r.nTrees).toBe(8750);
   });
 
   it("no definition.xml: skips the def rewrite, still scales the rest", () => {

@@ -44,6 +44,8 @@ export interface EnlargeResult {
   scaleNote: string;
   /** per-map zone push-back actually applied (m) */
   shift: number;
+  /** out-of-bounds trees removed (60–100% of those beyond the playable square) */
+  cull: number;
 }
 
 /** The batch enlarge transform: scale terrain XML + tree coords, push deployment
@@ -52,7 +54,7 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
   const enc = new TextEncoder();
   const inner = defPath.slice(0, -"definition.xml".length);
   const out: FileStore = new Map();
-  let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null, shift = 0;
+  let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null, shift = 0, cull = 0;
   let treePts: number[][] | null = null, colourBytes: Uint8Array<ArrayBuffer> | null = null;
   let dep: LoadedDeployment | null = null, depPath: string | null = null;
   const defBuf = store.get(defPath);
@@ -82,7 +84,27 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
       out.set(p, enc.encode(serializeDeployment(dp)));
     } else if (name === "bmd.tree_list" && v.length > 40) {
       const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
-      for (const s of tp.species) for (const tr of s.trees) { tr.x *= factor; tr.z *= factor; }
+      let oob = 0, inside = 0, total = 0;
+      const inBounds = (tr: { x: number; z: number }) => Math.abs(tr.x) <= extent / 2 && Math.abs(tr.z) <= extent / 2;
+      for (const s of tp.species) for (const tr of s.trees) {
+        tr.x *= factor; tr.z *= factor; total++;
+        if (inBounds(tr)) inside++;
+      }
+      // cull 60% of trees beyond the playable square, ramping to 90% as the
+      // projected post-fill count (inside × factor²) nears 30k, then to 100%
+      // at 35k. Integer keep quota spread evenly over the oob trees — no RNG.
+      const proj = inside * factor * factor;
+      const rate = proj <= 30000 ? 0.4 - 0.3 * proj / 30000 : Math.max(0, 0.1 - 0.1 * (proj - 30000) / 5000);
+      const keepN = Math.round((total - inside) * rate);
+      for (const s of tp.species) {
+        s.trees = s.trees.filter(tr => {
+          if (inBounds(tr)) return true;
+          const kept = Math.floor((oob + 1) * keepN / (total - inside)) > Math.floor(oob * keepN / (total - inside));
+          oob++;
+          if (!kept) cull++;
+          return kept;
+        });
+      }
       nTrees = tp.species.reduce((a, s) => a + s.trees.length, 0);
       treePts = tp.species.flatMap(s => s.trees.map(tr => [tr.x, tr.z]));
       out.set(p, buildTreeList(tp));
@@ -91,7 +113,7 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
       out.set(p, v);
     }
   }
-  return { out, root: inner, nTrees, nZones, dep, depPath, colourBytes, treePts, extent, origScale, scaleNote, shift };
+  return { out, root: inner, nTrees, nZones, dep, depPath, colourBytes, treePts, extent, origScale, scaleNote, shift, cull };
 }
 
 /** Write live edits (xml overrides, trees, changed deployment) back into a bundle's store. */

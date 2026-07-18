@@ -340,7 +340,7 @@ it("layer checkboxes toggle all four layers off and on", async () => {
 
 it("auto-fill cluster adds the requested trees and undo removes them", async () => {
   await setup();
-  fireEvent.change(screen.getByPlaceholderText("9"), { target: { value: "25" } });
+  fireEvent.change(screen.getByPlaceholderText("5"), { target: { value: "25" } });
   fireEvent.click(screen.getByText("add trees"));
   await screen.findByText(/Added 25 trees \(cluster/);
   expect(count("pine") + count("oaktree")).toBe(28);
@@ -352,7 +352,7 @@ it("auto-fill cluster adds the requested trees and undo removes them", async () 
 it("auto-fill uniform algorithm fills", async () => {
   await setup();
   clickTool("uniform");
-  fireEvent.change(screen.getByPlaceholderText("9"), { target: { value: "10" } });
+  fireEvent.change(screen.getByPlaceholderText("5"), { target: { value: "10" } });
   fireEvent.click(screen.getByText("add trees"));
   await screen.findByText(/Added 10 trees \(uniform/);
   expect(count("pine") + count("oaktree")).toBe(13);
@@ -361,7 +361,7 @@ it("auto-fill uniform algorithm fills", async () => {
 it("auto-fill spaced algorithm fills", async () => {
   await setup();
   clickTool("spaced");
-  fireEvent.change(screen.getByPlaceholderText("9"), { target: { value: "5" } });
+  fireEvent.change(screen.getByPlaceholderText("5"), { target: { value: "5" } });
   fireEvent.click(screen.getByText("add trees"));
   await screen.findByText(/Added \d+ trees \(spaced/);
 });
@@ -369,23 +369,23 @@ it("auto-fill spaced algorithm fills", async () => {
 it("auto-fill colour algorithm uses the loaded colour map", async () => {
   await setup();
   clickTool("colour");
-  fireEvent.change(screen.getByPlaceholderText("9"), { target: { value: "10" } });
+  fireEvent.change(screen.getByPlaceholderText("5"), { target: { value: "10" } });
   fireEvent.click(screen.getByText("add trees"));
   await screen.findByText(/Added \d+ trees \(colour/);
 });
 
-it("blank fill count uses the suggested target (3x current total)", async () => {
+it("blank fill count uses the half-density suggested target", async () => {
   await setup();
-  fireEvent.click(screen.getByText("add trees"));   // fillN '' -> suggested 9
-  await screen.findByText(/Added 9 trees \(cluster/);
-  expect(count("pine") + count("oaktree")).toBe(12);
+  fireEvent.click(screen.getByText("add trees"));   // fillN '' -> suggested round(3·3·0.5) = 5
+  await screen.findByText(/Added 5 trees \(cluster/);
+  expect(count("pine") + count("oaktree")).toBe(8);
 });
 
 it("fillN '0' falls back to the suggested target, not the zero path", async () => {
   await setup();
-  fireEvent.change(screen.getByPlaceholderText("9"), { target: { value: "0" } });
+  fireEvent.change(screen.getByPlaceholderText("5"), { target: { value: "0" } });
   fireEvent.click(screen.getByText("add trees"));
-  await screen.findByText(/Added 9 trees \(cluster/);
+  await screen.findByText(/Added 5 trees \(cluster/);
   expect(screen.queryByText(/Nothing to add/)).toBeNull();
 });
 

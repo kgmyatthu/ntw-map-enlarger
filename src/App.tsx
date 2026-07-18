@@ -23,6 +23,7 @@ import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir
 // =====================================================================
 
 const SP_COLORS = ["#7ec97e", "#5fb8b8", "#c9b45f", "#b88add", "#e08b6d", "#8fa9e0", "#d97fa6", "#a3c95f"];
+const FILL_INTENSITY = 0.5;   // ponytail: auto-fill adds this fraction of full original density; tune here
 const ROT_KNOB = 22;   // px from the zone's top edge to the rotate knob
 
 export default function MapEnlarger() {
@@ -183,7 +184,7 @@ export default function MapEnlarger() {
     if (!trees) return;
     const total = trees.species.reduce((a, s) => a + s.trees.length, 0);
     if (!total) { setStatus("No existing trees to base fill on."); return; }
-    const suggested = Math.round(total * (appliedF * appliedF - 1));
+    const suggested = Math.round(total * (appliedF * appliedF - 1) * FILL_INTENSITY);
     const target = Math.min(parseInt(fillN) > 0 ? parseInt(fillN) : Math.max(suggested, 0), 45000 - total);
     if (target <= 0) { setStatus("Nothing to add (target 0)."); return; }
     const { addedPer, added } = fillSpecies(trees.species, target, mapSize, fillAlgo, fillAlgo === "colour" ? colourWeightFn() : null);
@@ -316,7 +317,7 @@ export default function MapEnlarger() {
         if (fillN.trim() !== "0" && tKey && r.nTrees) {   // ponytail: fill box "0" = skip auto-fill
           const v = r.out.get(tKey)!;
           const tp = parseTreeList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
-          const target = Math.min(Math.round(r.nTrees * (fac * fac - 1)), 45000 - r.nTrees);
+          const target = Math.min(Math.round(r.nTrees * (fac * fac - 1) * FILL_INTENSITY), 45000 - r.nTrees);
           if (target > 0) {
             auto = fillSpecies(tp.species, target, r.extent, "cluster", null).added;
             r.out.set(tKey, buildTreeList(tp));
@@ -330,7 +331,7 @@ export default function MapEnlarger() {
           thumb, nTrees: r.nTrees, nZones: r.nZones, dep: r.dep, depPath: r.depPath,
           colourBytes: r.colourBytes, extent: r.extent, origScale: r.origScale, scaleSet,
         });
-        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto), ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}`);
+        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto${r.cull ? `, ${r.cull} oob culled` : ""}), ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}`);
       } catch (e) {
         // cast: everything thrown here (JSZip failures, our own throws) is an Error
         log.push(`✗ ${f.name}: ${(e as Error).message}`);
@@ -660,7 +661,7 @@ export default function MapEnlarger() {
             ))}
           </div>
           <div style={S.row}>
-            <input style={{ ...S.num, width: 76 }} type="number" placeholder={trees ? String(Math.round(trees.species.reduce((x, s) => x + s.trees.length, 0) * (appliedF * appliedF - 1))) : "n"} value={fillN} onChange={e => setFillN(e.target.value)} />
+            <input style={{ ...S.num, width: 76 }} type="number" placeholder={trees ? String(Math.round(trees.species.reduce((x, s) => x + s.trees.length, 0) * (appliedF * appliedF - 1) * FILL_INTENSITY)) : "n"} value={fillN} onChange={e => setFillN(e.target.value)} />
             <button style={{ ...S.btn(false), flex: 1 }} onClick={fillTrees} disabled={!trees}>add trees</button>
           </div>
           <p style={{ fontSize: 10, color: "#6d755f", lineHeight: 1.4, margin: "2px 0 0" }}>
