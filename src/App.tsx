@@ -8,7 +8,7 @@ import type {
 import { parseTreeList, buildTreeList } from "./lib/treeList";
 import { readDDS } from "./lib/dds";
 import { parseDeployment, serializeDeployment, autoShiftZones, zonesOverlap, zoneInBounds } from "./lib/deployment";
-import { setScale, baseTerrainWidth, patchGridFx } from "./lib/xml";
+import { setScale, baseTerrainWidth, worldWidth, patchGridFx } from "./lib/xml";
 import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, fillSpecies } from "./lib/edit";
 import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "./lib/store";
 import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir, pickExportDir } from "./lib/canvas";
@@ -72,13 +72,14 @@ export default function MapEnlarger() {
     const get = (n: string) => findFile(store, root, n);
 
     const def = get("definition.xml");
-    if (!def) throw new Error("no definition.xml in zip");
-    const defTxt = new TextDecoder().decode(def.v);
-    const raw = Math.round(baseTerrainWidth(defTxt));
+    const hs0 = get("height_map_0_settings.xml");
+    // no definition.xml: width from height settings (factor-scaled in processed bundles, same as the def would be)
+    const raw = Math.round(def ? baseTerrainWidth(new TextDecoder().decode(def.v))
+      : worldWidth(hs0 ? new TextDecoder().decode(hs0.v) : ""));
     const bs = processedFactor ? Math.round(raw / processedFactor) : raw;
     setBaseSize(bs);
     setMapName(displayName);
-    xmlRef.current = { [def.p]: defTxt };
+    xmlRef.current = def ? { [def.p]: new TextDecoder().decode(def.v) } : {};
     for (let i = 0; i < 4; i++) {
       const s = get(`height_map_${i}_settings.xml`);
       if (s) xmlRef.current[s.p] = new TextDecoder().decode(s.v);
@@ -597,11 +598,19 @@ export default function MapEnlarger() {
     act: (en: boolean) => ({ width: "100%", padding: "9px", background: en ? "#5a4a1e" : "#242a1e", border: `1px solid ${en ? "#a08a3a" : "#3a4433"}`, color: en ? "#f0e8c0" : "#6a715c", borderRadius: 3, cursor: en ? "pointer" : "default", fontFamily: "inherit", fontSize: 13, marginTop: 6 }),
     ent: (on: boolean) => ({ display: "flex", alignItems: "center", gap: 6, padding: "4px 7px", marginBottom: 2, background: on ? "#2a3323" : "transparent", border: `1px solid ${on ? "#5a6a44" : "transparent"}`, borderRadius: 3, cursor: "pointer", fontSize: 11 }),
     num: { width: 64, background: "#1c2318", border: "1px solid #3a4433", color: "#d9d4bd", padding: "3px 6px", borderRadius: 3, fontFamily: "inherit" },
-    status: { position: "absolute", left: 306, bottom: 10, right: 12, fontSize: 11, color: "#9aa287", background: "#141a10cc", padding: "6px 10px", borderRadius: 4, pointerEvents: "none" },
+    status: { position: "absolute", left: 306, bottom: 10, right: 12, fontSize: 13, color: "#9aa287", background: "#141a10cc", padding: "10px 14px", borderRadius: 4, pointerEvents: "none" },
   };
 
   return (
     <div style={S.app}>
+      {batchBusy && (
+        <div style={{ position: "fixed", inset: 0, background: "#000a", zIndex: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ background: "#151a11", border: "1px solid #5a6a44", borderRadius: 6, padding: 18, width: 440, maxHeight: "70vh", overflowY: "auto", fontSize: 12 }}>
+            <div style={{ color: "#e8e3c9", marginBottom: 10 }}>Processing maps… ({batchLog.length} done)</div>
+            {batchLog.map((l, i) => <div key={i} style={{ color: l.startsWith("✓") ? "#9ab87a" : "#d08a7a", marginBottom: 2 }}>{l}</div>)}
+          </div>
+        </div>
+      )}
       <div style={S.side}>
         <h1 style={S.h}>NTW MAP ENLARGER</h1>
         <p style={S.sub}>{mapName || "custom battle-map toolkit"}</p>
@@ -667,7 +676,8 @@ export default function MapEnlarger() {
             zones are pushed toward the map edge per map, stopping headroom
             metres short so they never touch the boundary.
           </p>
-          {batchLog.length > 0 && bundles.length === 0 && (
+          {/* while busy the log lives in the modal; this stays as the all-failed fallback */}
+          {batchLog.length > 0 && bundles.length === 0 && !batchBusy && (
             <div style={{ fontSize: 10, background: "#151a11", padding: 6, borderRadius: 3, marginTop: 4, maxHeight: 120, overflowY: "auto" }}>
               {batchLog.map((l, i) => <div key={i} style={{ color: l.startsWith("✓") ? "#9ab87a" : "#d08a7a" }}>{l}</div>)}
             </div>

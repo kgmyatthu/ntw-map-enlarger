@@ -13,6 +13,12 @@ export function baseTerrainWidth(defTxt: string): number {
   return bw ? parseFloat(bw[1]) : 2048;
 }
 
+/** Terrain width from a height_map_N_settings.xml — the no-definition.xml fallback. */
+export function worldWidth(txt: string): number {
+  const m = /world_width='([0-9.]+)'/.exec(txt);
+  return m ? parseFloat(m[1]) : 2048;
+}
+
 // grid.fx patch — the streak fix. The terrain shader computes colour/blend
 // UVs as world_position.xz / terrain_size_meters + 0.5 with the CPU feeding
 // 2048; scaling the divisor widens the window to match the enlarged map.

@@ -2,7 +2,7 @@ import JSZip from "jszip";
 import type { FileStore, LoadedDeployment, LoadedTreeList } from "../types";
 import { parseTreeList, buildTreeList } from "./treeList";
 import { parseDeployment, serializeDeployment, autoShiftZones } from "./deployment";
-import { scaleAttr, baseTerrainWidth } from "./xml";
+import { scaleAttr, baseTerrainWidth, worldWidth } from "./xml";
 
 /** Find a file by name under root, at any depth, or at the archive top level. */
 export function findFile(store: FileStore, root: string, n: string): { p: string; v: Uint8Array<ArrayBuffer> } | null {
@@ -10,7 +10,9 @@ export function findFile(store: FileStore, root: string, n: string): { p: string
   return null;
 }
 
-/** Unpack a map zip into a FileStore; throws if it has no definition.xml. */
+/** Unpack a map zip into a FileStore. defPath may be virtual (file absent):
+ * without a definition.xml the root is anchored on another edited file and
+ * the def rewrite is simply skipped downstream. */
 export async function loadZipStore(f: File | Blob | ArrayBuffer): Promise<{ store: FileStore; defPath: string }> {
   const zip = await JSZip.loadAsync(f);
   const store: FileStore = new Map();
@@ -20,7 +22,11 @@ export async function loadZipStore(f: File | Blob | ArrayBuffer): Promise<{ stor
     store.set(path, new Uint8Array(await zip.files[path].async("arraybuffer")));
     if (path.endsWith("definition.xml")) defPath = path;
   }
-  if (!defPath) throw new Error("no definition.xml");
+  if (!defPath) {
+    const alt = [...store.keys()].find(p => /(^|\/)(height_map_0_settings\.xml|deployment_areas\.xml|bmd\.tree_list)$/.test(p));
+    if (!alt) throw new Error("no definition.xml");
+    defPath = alt.slice(0, alt.lastIndexOf("/") + 1) + "definition.xml";
+  }
   return { store, defPath };
 }
 
@@ -49,7 +55,11 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
   let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null, shift = 0;
   let treePts: number[][] | null = null, colourBytes: Uint8Array<ArrayBuffer> | null = null;
   let dep: LoadedDeployment | null = null, depPath: string | null = null;
-  const extent = Math.round(baseTerrainWidth(new TextDecoder().decode(store.get(defPath))) * factor);
+  const defBuf = store.get(defPath);
+  // ponytail: no definition.xml -> width from height settings world_width (they match in NTW maps), else 2048
+  const width = defBuf ? baseTerrainWidth(new TextDecoder().decode(defBuf))
+    : worldWidth(new TextDecoder().decode(findFile(store, inner, "height_map_0_settings.xml")?.v ?? new Uint8Array()));
+  const extent = Math.round(width * factor);
   for (const [p, v] of store) {
     const name = inner ? p.slice(inner.length) : p;
     if (name === "definition.xml") {

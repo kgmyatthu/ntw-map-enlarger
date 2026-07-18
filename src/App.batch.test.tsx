@@ -81,12 +81,12 @@ it("corrupt zip: ✗ log entry and 'Batch: no maps processed.'", async () => {
   expect(screen.queryByText("review")).toBeNull();
 });
 
-it("zip without definition.xml: 'no definition.xml' log entry", async () => {
+it("zip without definition.xml still processes (def rewrite skipped)", async () => {
   const { container } = render(<App />);
   fireEvent.change(zipInput(container), { target: { files: [await makeMapZip({ name: "nodef", def: null })] } });
 
-  await screen.findByText("Batch: no maps processed.");
-  expect(screen.getByText(/✗ nodef\.zip: no definition\.xml/)).toBeTruthy();
+  await screen.findByText(/Batch processed 1\/1 maps/, undefined, { timeout: 4000 });
+  expect(screen.getByText("nodef [1/1]")).toBeTruthy();
 });
 
 it("mixed good+bad batch: ✓ log line with counts + scale note, then 'Batch processed 1/2'", async () => {

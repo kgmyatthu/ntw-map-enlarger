@@ -95,12 +95,20 @@ describe("loadZipStore", () => {
     expect(text(store, "readme.txt")).toBe("hi");
   });
 
-  it("throws 'no definition.xml' when the archive has none", async () => {
+  it("throws 'no definition.xml' when the archive has no anchor file either", async () => {
     const zip = new JSZip();
     zip.file("readme.txt", "hi");
     zip.file("mymap/height_map_0.dds", makeDDS(4, 4, 8));
     await expect(loadZipStore(await zip.generateAsync({ type: "arraybuffer" })))
       .rejects.toThrow("no definition.xml");
+  });
+
+  it("no definition.xml: anchors a virtual defPath on height settings", async () => {
+    const zip = new JSZip();
+    zip.file("mymap/height_map_0_settings.xml", HEIGHT_XML);
+    const { store, defPath } = await loadZipStore(await zip.generateAsync({ type: "arraybuffer" }));
+    expect(defPath).toBe("mymap/definition.xml");
+    expect(store.has(defPath)).toBe(false);
   });
 
   it("loads the makeMapZip File fixture with no directory keys in the store", async () => {
@@ -307,6 +315,20 @@ describe("enlargeStore edge cases", () => {
     expect(text(r.out, "height_map_0_settings.xml")).toContain("world_width='2048.000000'");
     expect(r.origScale).toBe("0.600000");
     expect(r.colourBytes).toBe(img);
+  });
+
+  it("no definition.xml: skips the def rewrite, still scales the rest", () => {
+    const store = makeStore({
+      "m/height_map_0_settings.xml": HEIGHT_XML,
+      "m/deployment_areas.xml": DEPLOY_XML,
+      "m/bmd.tree_list": defaultTreeListBuf(),
+    });
+    const r = enlargeStore(store, "m/definition.xml", 2, 100);
+    expect(r.extent).toBe(2048);   // from world_width, not the 2048 default (1024 * 2)
+    expect(r.out.has("m/definition.xml")).toBe(false);
+    expect(text(r.out, "m/height_map_0_settings.xml")).toContain("world_width='2048.000000'");
+    expect(r.nZones).toBe(3);
+    expect(r.nTrees).toBe(3);
   });
 });
 
