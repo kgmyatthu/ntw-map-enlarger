@@ -194,6 +194,11 @@ export function autoShiftZones(zones: Zone[], extent: number, headroom: number):
   const pushes: Push[] = [];
   for (const g of glist) {
     const [ux, uy] = dirOf(g);
+    // armies face along the zone's local +h axis (−sin o, cos o); a facing with
+    // a positive component along the outward ray deploys staring at the map
+    // edge — flip it 180° (tilt preserved) so every zone faces inward
+    for (const z of g) if (Math.cos(z.o) * uy - Math.sin(z.o) * ux > 0)
+      z.o = (z.o + Math.PI) % (2 * Math.PI);   // unrounded: serialize rounds, and a rounded π skews halfExtents
     let t = Infinity;
     for (const z of g) {
       const [hx, hy] = halfExtents(z);

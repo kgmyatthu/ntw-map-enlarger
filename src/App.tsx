@@ -514,6 +514,13 @@ export default function MapEnlarger() {
         ctx.globalAlpha = 1;
         ctx.strokeStyle = col; ctx.lineWidth = zi === selZone ? 2.5 : 1.3;
         ctx.strokeRect(-zw / 2, -zh / 2, zw, zh);
+        // facing arrow: the deployed army faces the zone's local +h direction
+        // (verified on real maps: opposing alliances' orientations point at each other)
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, 0); ctx.lineTo(0, zh / 2 + 14);
+        ctx.moveTo(-5, zh / 2 + 8); ctx.lineTo(0, zh / 2 + 14); ctx.lineTo(5, zh / 2 + 8);
+        ctx.stroke();
         if (zi === selZone && tool === "zones") {
           // corner resize handles + rotate knob, drawn in the zone's rotated frame
           ctx.fillStyle = "#f0ecd8";

@@ -216,6 +216,19 @@ describe("autoShiftZones", () => {
     expect(autoShiftZones([], 2048, 100)).toBe(0);
   });
 
+  it("flips outward-facing zones 180° to face inward, keeping the tilt", () => {
+    const away = mk(0, -400, 300, 150, Math.PI);        // at -y facing -y: outward
+    const ok = mk(0, -400, 300, 150, 0, 1);             // at -y facing +y: inward, kept
+    const tilted = mk(0, 400, 300, 150, 0.4, 2);        // at +y facing +y at an angle: outward
+    autoShiftZones([away, ok, tilted], 2048, 200);
+    expect(away.o).toBeCloseTo(0, 3);
+    expect(ok.o).toBe(0);
+    expect(tilted.o).toBeCloseTo(0.4 + Math.PI, 3);     // flipped, 0.4 rad tilt preserved
+    autoShiftZones([away, ok, tilted], 2048, 200);      // recompute: idempotent, no re-flip
+    expect(away.o).toBeCloseTo(0, 3);
+    expect(tilted.o).toBeCloseTo(0.4 + Math.PI, 3);
+  });
+
   it("scales a block's push back so opposing zones never overlap (converging rays)", () => {
     // both alliances on the same side: both groups push -y, the shallow one
     // would otherwise plough through the deep one
