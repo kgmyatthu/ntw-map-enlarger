@@ -1,10 +1,12 @@
-import type { Species, Zone, UndoAction, TreeList, Deployment, FillAlgo, RemovedTree, View } from "../types";
+import type { Species, Zone, UndoAction, TreeList, Deployment, FillAlgo, RemovedTree, View, HeightMap, BuildingList } from "../types";
 
 // ---------- world/screen transforms ----------
+// screen y = -world z: the game renders +Z upward, so the viewer mirrors it too
+// (display-only — no file data is ever flipped)
 export const w2s = (v: View, x: number, z: number, cw: number, ch: number): [number, number] =>
-  [cw / 2 + (x - v.cx) * v.zoom, ch / 2 + (z - v.cz) * v.zoom];
+  [cw / 2 + (x - v.cx) * v.zoom, ch / 2 - (z - v.cz) * v.zoom];
 export const s2w = (v: View, sx: number, sz: number, cw: number, ch: number): [number, number] =>
-  [(sx - cw / 2) / v.zoom + v.cx, (sz - ch / 2) / v.zoom + v.cz];
+  [(sx - cw / 2) / v.zoom + v.cx, (ch / 2 - sz) / v.zoom + v.cz];
 
 // ---------- tree edits (mutate species in place; caller records undo) ----------
 /** Append trees at pts to species[si], cloning extras from existing records. Null = no prototype anywhere. */
@@ -53,11 +55,12 @@ export function zoneAt(zones: Zone[], block: number, wx: number, wz: number): nu
 }
 
 // ---------- undo ----------
-export function applyUndo(a: UndoAction, trees: TreeList | null, deploy: Deployment | null): void {
-  // non-null trees/deploy: undo entries are only pushed while that state exists
+export function applyUndo(a: UndoAction, trees: TreeList | null, deploy: Deployment | null, blds: BuildingList[] | null = null): void {
+  // non-null trees/deploy/blds: undo entries are only pushed while that state exists
   if (a.type === "fill") a.addedPer.forEach((n, si) => n && trees!.species[si].trees.splice(-n, n));
   else if (a.type === "zone-move") { const z = deploy!.zones[a.zi]; z.x = a.x; z.y = a.y; z.w = a.w; z.h = a.h; z.o = a.o; if (a.x0 !== undefined) z.x0 = a.x0; if (a.y0 !== undefined) z.y0 = a.y0; deploy!.changed = true; }
   else if (a.type === "tree-add") trees!.species[a.si].trees.splice(-a.n, a.n);
+  else if (a.type === "bldg-move") { const bd = blds![a.li].records[a.ri]; bd.x = a.x; bd.z = a.z; }
   else [...a.removed].reverse().forEach(r => trees!.species[r.si].trees.splice(r.i, 0, r.t));
 }
 
@@ -72,15 +75,78 @@ export function makeColourWeight(d: Uint8ClampedArray, S: number, mapSize: numbe
   };
 }
 
-/** No-plant mask from the map's ground_type_map_0 image (RGBA pixels, row 0 = top). */
-export function makeRoadMask(d: Uint8ClampedArray, w: number, h: number, mapSize: number) {
-  // ponytail: surveyed 656 vanilla+mod maps — roads/rivers are black, water pure
-  // blue, and every plantable ground type has R or G >= 68, so dark R+G = no-plant
+/** Local depression sampler: how far (heightmap value units) a point sits below
+ * the mean of its ~60 m neighbourhood. Rivers and streams are carved LOCAL minima,
+ * so this finds them in highlands too — no global water level involved (row 0 = +Z). */
+export function makeDepressionSampler(hm: HeightMap, mapSize: number) {
+  const { w, h, px } = hm;
+  // ponytail: 150 m half-window — must exceed the widest river's half-width or its
+  // middle reads as flat; widen further if broad waterways still catch trees
+  const r = Math.max(2, Math.min(128, Math.round(150 * w / mapSize)));
+  // separable box mean via running sums, edge-clamped
+  const tmp = new Float32Array(w * h), mean = new Float32Array(w * h);
+  const n = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let s = 0;
+    for (let x = -r; x <= r; x++) s += px[row + Math.min(w - 1, Math.max(0, x))];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = s / n;
+      s += px[row + Math.min(w - 1, x + r + 1)] - px[row + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let s = 0;
+    for (let y = -r; y <= r; y++) s += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+    for (let y = 0; y < h; y++) {
+      mean[y * w + x] = s / n;
+      s += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+    }
+  }
+  return (wx: number, wz: number) => {
+    const u = wx / mapSize + 0.5, v = 1 - (wz / mapSize + 0.5);
+    const X = Math.min(w - 1, Math.max(0, (u * w) | 0)), Y = Math.min(h - 1, Math.max(0, (v * h) | 0));
+    return mean[Y * w + X] - px[Y * w + X];   // > 0: below the local surroundings
+  };
+}
+
+/** No-plant mask around buildings: true within r metres of any placed record. */
+export function makeBuildingMask(pts: { x: number; z: number }[], r = 20) {
+  // ponytail: 20 m keeps yards/lanes clear; grid hash, same trick as fillSpecies spacing
+  const m = new Map<string, { x: number; z: number }[]>();
+  const gc = (v: number) => (v / r) | 0;
+  for (const p of pts) {
+    const k = gc(p.x) + ":" + gc(p.z);
+    const b = m.get(k);
+    b ? b.push(p) : m.set(k, [p]);
+  }
+  return (wx: number, wz: number) => {
+    for (let i = gc(wx) - 1; i <= gc(wx) + 1; i++) for (let j = gc(wz) - 1; j <= gc(wz) + 1; j++)
+      for (const p of m.get(i + ":" + j) ?? [])
+        if ((p.x - wx) * (p.x - wx) + (p.z - wz) * (p.z - wz) <= r * r) return true;
+    return false;
+  };
+}
+
+/** Carve depth (heightmap units, ≈4 8-bit levels) that masks carved stream beds even under green paint. */
+export const DEP_BARE = 0.015;
+
+/** No-plant mask from ground_type_map_0 + local heightmap depressions.
+ * Same shape as the road rule that works: decided by ink alone. Trees plant
+ * ONLY on greenish ground types — every other ink (black roads, water in any
+ * palette, rock, sand, mud) is no-plant, deterministically. The depression
+ * check only ADDS masking: carved stream beds painted over with green. */
+export function makeRoadMask(d: Uint8ClampedArray, w: number, h: number, mapSize: number,
+  depFn: ((wx: number, wz: number) => number) | null = null) {
+  // ponytail: survey of 656 vanilla+mod maps — plantable ground types are green-dominant
+  // with G >= 68; the greenish net below is the knob if a real map's forest ink misses
   return (wx: number, wz: number) => {
     const u = wx / mapSize + 0.5, v = 1 - (wz / mapSize + 0.5);   // row 0 = +Z
     const px = Math.min(w - 1, Math.max(0, (u * w) | 0)), py = Math.min(h - 1, Math.max(0, (v * h) | 0));
-    const i = (py * w + px) * 4;
-    return d[i] < 40 && d[i + 1] < 40;
+    const i = (py * w + px) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+    const greenish = g > 45 && g >= r - 6 && g >= b + 4;   // green-dominant; neutral grey does NOT count
+    if (!greenish) return true;
+    return !!depFn && depFn(wx, wz) > DEP_BARE;
   };
 }
 

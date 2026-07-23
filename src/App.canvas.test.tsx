@@ -9,8 +9,8 @@ import type { MapZipOpts } from "./test/fixtures";
 //
 // Geometry: jsdom canvas defaults to 300x150 and getBoundingClientRect() is
 // all zeros, so clientX/clientY ARE canvas coordinates. The initial view is
-// zoom 0.16 centred on world (0,0), hence
-//   world (wx,wz) -> screen (150 + wx*0.16, 75 + wz*0.16).
+// zoom 0.16 centred on world (0,0); screen y is MIRRORED (+z up, like the game):
+//   world (wx,wz) -> screen (150 + wx*0.16, 75 - wz*0.16).
 // The zip goes through the default x2 batch: tree world coords are doubled
 // (pine (200,-100) & (40,60), oaktree (-160,120)); deployment zones keep
 // their x but get y auto-pushed toward the edge until we raise the headroom
@@ -18,7 +18,7 @@ import type { MapZipOpts } from "./test/fixtures";
 // ---------------------------------------------------------------------------
 
 const SX = (wx: number) => 150 + wx * 0.16;
-const SZ = (wz: number) => 75 + wz * 0.16;
+const SZ = (wz: number) => 75 - wz * 0.16;
 
 let restoreImage: () => void;
 beforeEach(() => { restoreImage = stubImage(); });
@@ -184,10 +184,10 @@ it("dragging a corner handle resizes the zone about its centre; undo restores", 
   await zeroShift();
   clickTool("zones (drag to move)");
   selectZone(canvas);
-  // zone is 48x24 px at screen (118,11): bottom-right corner handle at (142,23)
-  down(canvas, 142, 23);
-  move(canvas, 166, 35);      // world (100,-250): |rx|=300, |rz|=150 -> 600 x 300
-  up(canvas, 166, 35);
+  // zone is 48x24 px at screen (118,139): bottom-right corner handle at (142,151)
+  down(canvas, 142, 151);
+  move(canvas, 166, 115);     // world (100,-250): |rx|=300, |rz|=150 -> 600 x 300
+  up(canvas, 166, 115);
   fireEvent.click(container.querySelector("#colour")!);   // ref mutation -> force rerender
   expect(screen.getByText(/600 × 300 m/)).toBeTruthy();
   fireEvent.click(undoBtn());
@@ -199,10 +199,10 @@ it("dragging the rotate knob spins the zone; undo restores orientation", async (
   await zeroShift();
   clickTool("zones (drag to move)");
   selectZone(canvas);
-  // knob sits 22px above the top edge: (118, 11-12-22) = (118,-23)
-  down(canvas, 118, -23);
-  move(canvas, 142, 11);      // pointer due +x of the centre -> o = pi/2
-  up(canvas, 142, 11);
+  // zone centre at (118, 139); knob now trails the facing arrow: 22px BELOW the edge (118, 139+12+22)
+  down(canvas, 118, 173);
+  move(canvas, 142, 139);     // pointer due +x of the centre -> o = +pi/2
+  up(canvas, 142, 139);
   fireEvent.click(container.querySelector("#colour")!);
   expect(screen.getByText(/90\.0°/)).toBeTruthy();
   fireEvent.click(undoBtn());

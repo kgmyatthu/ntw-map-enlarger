@@ -1,6 +1,7 @@
 import JSZip from "jszip";
-import type { FileStore, LoadedDeployment, LoadedTreeList } from "../types";
+import type { FileStore, LoadedDeployment, LoadedTreeList, LoadedBuildingList } from "../types";
 import { parseTreeList, buildTreeList } from "./treeList";
+import { parseBuildingList, buildBuildingList } from "./buildingList";
 import { parseDeployment, serializeDeployment, autoShiftZones } from "./deployment";
 import { scaleAttr, baseTerrainWidth, worldWidth } from "./xml";
 
@@ -46,6 +47,8 @@ export interface EnlargeResult {
   shift: number;
   /** out-of-bounds trees removed (60–100% of those beyond the playable square) */
   cull: number;
+  /** building records rescaled across all .building_list files */
+  nBldg: number;
 }
 
 /** The batch enlarge transform: scale terrain XML + tree coords, push deployment
@@ -54,7 +57,7 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
   const enc = new TextEncoder();
   const inner = defPath.slice(0, -"definition.xml".length);
   const out: FileStore = new Map();
-  let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null, shift = 0, cull = 0;
+  let nTrees = 0, nZones = 0, scaleNote = "", origScale: string | null = null, shift = 0, cull = 0, nBldg = 0;
   let treePts: number[][] | null = null, colourBytes: Uint8Array<ArrayBuffer> | null = null;
   let dep: LoadedDeployment | null = null, depPath: string | null = null;
   const defBuf = store.get(defPath);
@@ -108,29 +111,40 @@ export function enlargeStore(store: FileStore, defPath: string, factor: 1.5 | 2,
       nTrees = tp.species.reduce((a, s) => a + s.trees.length, 0);
       treePts = tp.species.flatMap((s, si) => s.trees.map(tr => [tr.x, tr.z, si]));
       out.set(p, buildTreeList(tp));
+    } else if (/\.building_list$/i.test(name) && (!inner || p.startsWith(inner))) {
+      // in-root only: a multi-map zip's sibling lists must pass through untouched
+      try {
+        const bp = parseBuildingList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+        for (const r of bp.records) { r.x *= factor; r.z *= factor; }
+        nBldg += bp.records.length;
+        out.set(p, buildBuildingList(bp));
+      } catch { out.set(p, v); }   // some packs ship CSV/foreign files under this extension: passthrough
     } else {
       if (/colour_map_0\.(jpg|jpeg|png)$/i.test(name)) colourBytes = v;
       out.set(p, v);
     }
   }
-  return { out, root: inner, nTrees, nZones, dep, depPath, colourBytes, treePts, extent, origScale, scaleNote, shift, cull };
+  return { out, root: inner, nTrees, nZones, dep, depPath, colourBytes, treePts, extent, origScale, scaleNote, shift, cull, nBldg };
 }
 
-/** Write live edits (xml overrides, trees, changed deployment) back into a bundle's store. */
-export function syncStore(store: FileStore, xml: Record<string, string>, trees: LoadedTreeList | null, deploy: LoadedDeployment | null): void {
+/** Write live edits (xml overrides, trees, buildings, changed deployment) back into a bundle's store. */
+export function syncStore(store: FileStore, xml: Record<string, string>, trees: LoadedTreeList | null, deploy: LoadedDeployment | null, blds: LoadedBuildingList[] | null = null): void {
   const enc = new TextEncoder();
   for (const p of Object.keys(xml)) store.set(p, enc.encode(xml[p]));
   if (trees) store.set(trees.path, buildTreeList(trees));
   if (deploy && deploy.changed) store.set(deploy.path, enc.encode(serializeDeployment(deploy)));
+  if (blds) for (const bl of blds) store.set(bl.path, buildBuildingList(bl));   // byte-identical when untouched
 }
 
 /** Entries for the export zip: edited files rewritten, everything else byte-identical passthrough. */
-export function exportEntries(files: FileStore, xml: Record<string, string>, trees: LoadedTreeList | null, deploy: LoadedDeployment | null): [string, Uint8Array<ArrayBuffer>][] {
+export function exportEntries(files: FileStore, xml: Record<string, string>, trees: LoadedTreeList | null, deploy: LoadedDeployment | null, blds: LoadedBuildingList[] | null = null): [string, Uint8Array<ArrayBuffer>][] {
   const entries: [string, Uint8Array<ArrayBuffer>][] = [];
+  const byPath = new Map((blds ?? []).map(bl => [bl.path, bl]));
   for (const [p, v] of files) {
     if (xml[p] !== undefined) entries.push([p, new TextEncoder().encode(xml[p])]);
     else if (trees && p === trees.path) entries.push([p, buildTreeList(trees)]);
     else if (deploy && p === deploy.path && deploy.changed) entries.push([p, new TextEncoder().encode(serializeDeployment(deploy))]);
+    else if (byPath.has(p)) entries.push([p, buildBuildingList(byPath.get(p)!)]);
     else entries.push([p, v]);
   }
   return entries;

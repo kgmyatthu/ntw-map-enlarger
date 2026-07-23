@@ -39,9 +39,10 @@ export async function makeThumb(colourBytes: Uint8Array<ArrayBuffer> | null, tre
       im.onload = () => res(im); im.onerror = () => res(null);
       im.src = URL.createObjectURL(new Blob([colourBytes]));
     });
-    if (img) { ctx.save(); ctx.translate(0, S); ctx.scale(1, -1); ctx.drawImage(img, 0, 0, S, S); ctx.restore(); }
+    // image row 0 = +Z and the mirrored viewer puts +Z at the top: draw unflipped
+    if (img) ctx.drawImage(img, 0, 0, S, S);
   }
-  const w2t = (x: number, z: number): [number, number] => [(x / extent + 0.5) * S, (z / extent + 0.5) * S];
+  const w2t = (x: number, z: number): [number, number] => [(x / extent + 0.5) * S, (0.5 - z / extent) * S];
   if (treePts) {
     // point = [x, z, speciesIdx?] — no idx falls back to colour 0, the old all-green look
     for (let i = 0; i < treePts.length; i += Math.max(1, (treePts.length / 2500) | 0)) {
@@ -56,7 +57,7 @@ export async function makeThumb(colourBytes: Uint8Array<ArrayBuffer> | null, tre
     ctx.strokeStyle = al === 0 ? "#6d9ee0" : "#e07d6d"; ctx.lineWidth = 1;
     ctx.save();
     ctx.translate(cx, cz);
-    ctx.rotate(o || 0);   // same screen convention as the viewer: +z down, rotate(o)
+    ctx.rotate(-(o || 0));   // same mirrored convention as the viewer: +z up, rotate(-o)
     ctx.strokeRect(-sw / 2, -sh / 2, sw, sh);
     ctx.restore();
   }
@@ -80,7 +81,8 @@ export type ExportDir = { getFileHandle(name: string, opts: { create: boolean })
 async function pumpZip(zip: JSZip, w: SaveTarget, onProgress?: (percent: number) => void): Promise<void> {
   try {
     await new Promise<void>((resolve, reject) => {
-      const s = zip.generateInternalStream({ type: "uint8array", streamFiles: true });
+      // DEFLATE: JSZip defaults to STORE, which re-emits well-compressing DDS/TGA payloads at full size
+      const s = zip.generateInternalStream({ type: "uint8array", streamFiles: true, compression: "DEFLATE" });
       // backpressure: pause the zip stream until each chunk is on disk
       s.on("data", (chunk, meta) => {
         s.pause();
@@ -117,7 +119,7 @@ export async function saveZipInDir(dir: ExportDir, zip: JSZip, name: string, onP
 export async function saveZip(zip: JSZip, name: string, onProgress?: (percent: number) => void): Promise<boolean> {
   const picker = (window as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
   if (!picker) {
-    const blob = await zip.generateAsync({ type: "blob", streamFiles: true }, m => onProgress?.(m.percent));
+    const blob = await zip.generateAsync({ type: "blob", streamFiles: true, compression: "DEFLATE" }, m => onProgress?.(m.percent));
     download(blob, name);
     return true;
   }

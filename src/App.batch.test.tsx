@@ -71,6 +71,78 @@ it("processes a single zip: grid tile, auto-filled species counts, tile click re
   await screen.findByText(loadedStatus);
 });
 
+it("3D view: button enables after import, draw takes the rasteriser branch, colour checkbox gates the drape", async () => {
+  // record every putImageData so the 3D software-rasteriser frames are observable
+  const puts: ImageData[] = [];
+  const origGC = HTMLCanvasElement.prototype.getContext;
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement, ...args: unknown[]) {
+    const ctx = (origGC as (...a: unknown[]) => CanvasRenderingContext2D).apply(this, args);
+    const orig = ctx.putImageData.bind(ctx);
+    ctx.putImageData = ((im: ImageData, x: number, y: number) => { puts.push(im); orig(im, x, y); }) as typeof ctx.putImageData;
+    return ctx;
+  } as typeof origGC);
+
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+
+  const btn3d = screen.getByRole("button", { name: "3D" }) as HTMLButtonElement;
+  expect(btn3d.disabled).toBe(false);   // fixture heightmap DDS was readable
+  puts.length = 0;
+  fireEvent.click(btn3d);
+  await screen.findByText(/3D terrain: drag = orbit/);
+  expect(puts.length).toBeGreaterThan(0);   // draw() rendered via the rasteriser
+  const withColour = new Uint8ClampedArray(puts[puts.length - 1].data);
+
+  fireEvent.click(container.querySelector("#colour")!);   // layers: colour map off
+  const bare = puts[puts.length - 1].data;
+  expect([...bare].some((v, i) => v !== withColour[i])).toBe(true);   // drape follows the checkbox
+});
+
+it("building lists: parsed + scaled on import, tool button enabled with the record count", async () => {
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+  const btn = screen.getByRole("button", { name: /buildings \(drag to move · 2\)/ }) as HTMLButtonElement;
+  expect(btn.disabled).toBe(false);
+  // re-view the tile: the loaded status reports the parsed building count
+  fireEvent.click(screen.getByText("mymap"));
+  await screen.findByText(/2 buildings ✓/);
+});
+
+it("building drag: mousedown grabs the nearest marker, mousemove moves it, undo restores", async () => {
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+  fireEvent.click(screen.getByRole("button", { name: /buildings \(drag to move/ }));
+
+  // fixture building "small_barn_v1" at (100,-50), ×2-enlarged to (200,-100);
+  // jsdom canvas is 300×150, mirrored view (+z up) zoom 0.16 → screen (182, 91)
+  const cv = container.querySelector("canvas")!;
+  const sx = 150 + 200 * 0.16, sz = 75 - -100 * 0.16;
+  fireEvent.mouseDown(cv, { clientX: sx, clientY: sz, button: 0 });
+  fireEvent.mouseMove(cv, { clientX: sx + 16, clientY: sz + 8 });   // +100 m x, +50 m z at zoom 0.16
+  fireEvent.mouseUp(cv, { clientX: sx + 16, clientY: sz + 8 });
+  expect(screen.getByRole("button", { name: "undo (1)" })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "undo (1)" }));
+  expect(screen.getByRole("button", { name: "undo (0)" })).toBeTruthy();
+
+  // hidden layer = no invisible edits: same grab with the buildings layer off does nothing
+  fireEvent.click(container.querySelector("#bldg")!);
+  fireEvent.mouseDown(cv, { clientX: sx, clientY: sz, button: 0 });
+  fireEvent.mouseMove(cv, { clientX: sx + 16, clientY: sz + 8 });
+  fireEvent.mouseUp(cv, { clientX: sx + 16, clientY: sz + 8 });
+  expect(screen.getByRole("button", { name: "undo (0)" })).toBeTruthy();
+});
+
+it("shows original → shifted bias under height scale (x2: -5 sinks to -10)", async () => {
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+  expect(screen.getByText("bias -5 → -10")).toBeTruthy();
+});
+
 it("selected map shows the original view panel beside the enlarged viewer", async () => {
   const { container } = render(<App />);
   fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
@@ -111,7 +183,7 @@ it("mixed good+bad batch: ✓ log line with counts + scale note, then 'Batch pro
 
   // the log is only rendered while no bundles exist; catch it while file 2 fails
   // largest group push: block-1 zone rides its centroid ray until y binds (t≈434)
-  await screen.findByText(/✓ mymap\.zip: ×2, 8 trees \(5 auto\), 3 zones \+434m, scale 0\.600000→1\.200000/, undefined, { timeout: 4000 });
+  await screen.findByText(/✓ mymap\.zip: ×2, 8 trees \(5 auto\), 2 bldg, 3 zones \+434m, scale 0\.600000→1\.200000/, undefined, { timeout: 4000 });
 
   await screen.findByText(/Batch processed 1\/2 maps/);
   expect(screen.getByText("8t")).toBeTruthy();

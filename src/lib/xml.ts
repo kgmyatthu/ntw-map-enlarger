@@ -8,6 +8,15 @@ export function setScale(xml: string, scale: string): string {
   return xml.replace(/(scale=')([0-9.\-]+)(')/g, (m: string, a: string, v: string, c: string) => `${a}${scale}${c}`);
 }
 
+/** Sink the heightmap bias with the enlargement: b -> b - |b|*(f-1).
+ * -5 at x1.5 -> -7.5; +5 at x1.5 -> 2.5; no bias attribute = no-op. */
+export function shiftBias(xml: string, factor: number): string {
+  return xml.replace(/(\bbias=')([0-9.\-]+)(')/g, (m: string, a: string, v: string, c: string) => {
+    const b = parseFloat(v);
+    return `${a}${(b - Math.abs(b) * (factor - 1)).toFixed(6)}${c}`;
+  });
+}
+
 export function baseTerrainWidth(defTxt: string): number {
   const bw = /base_terrain_width='([0-9.]+)'/.exec(defTxt);
   return bw ? parseFloat(bw[1]) : 2048;

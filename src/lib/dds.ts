@@ -5,6 +5,10 @@ export function readDDS(buf: ArrayBufferLike): HeightMap {
   const dv = new DataView(buf);
   const h = dv.getUint32(12, true), w = dv.getUint32(16, true);
   const bits = dv.getUint32(88, true);
+  // FourCC/DXT-compressed (RGBBitCount 0) and truncated files must throw, not
+  // decode noise/NaN — callers rely on the throw to skip height features cleanly
+  if (![8, 16, 24, 32].includes(bits) || 128 + w * h * (bits / 8) > buf.byteLength)
+    throw new Error(`unsupported dds (${bits}-bit; compressed or truncated?)`);
   const px = new Float32Array(w * h);
   if (bits === 8) {
     const d = new Uint8Array(buf, 128, w * h);

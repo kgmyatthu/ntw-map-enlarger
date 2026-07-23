@@ -216,6 +216,18 @@ describe("autoShiftZones", () => {
     expect(autoShiftZones([], 2048, 100)).toBe(0);
   });
 
+  it("faces the OPPOSING alliance when one exists — even where the map-edge rule would keep it", () => {
+    // both armies along the +y edge; the enemy is due east/west, not toward the map centre
+    const a = mk(-600, 700, 200, 100, 2.9, 0, 0);   // facing NW-ish: inward by the edge rule, but AWAY from its foe
+    const b = mk(600, 700, 200, 100, 2.9, 0, 1);    // same facing: already toward its foe
+    autoShiftZones([a, b], 2048, 200);
+    expect(a.o).toBeCloseTo((2.9 + Math.PI) % (2 * Math.PI), 3);   // flipped to face the enemy
+    expect(b.o).toBeCloseTo(2.9, 3);                               // kept
+    autoShiftZones([a, b], 2048, 200);                             // recompute: idempotent
+    expect(a.o).toBeCloseTo((2.9 + Math.PI) % (2 * Math.PI), 3);
+    expect(b.o).toBeCloseTo(2.9, 3);
+  });
+
   it("flips outward-facing zones 180° to face inward, keeping the tilt", () => {
     const away = mk(0, -400, 300, 150, Math.PI);        // at -y facing -y: outward
     const ok = mk(0, -400, 300, 150, 0, 1);             // at -y facing +y: inward, kept

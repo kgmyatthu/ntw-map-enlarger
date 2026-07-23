@@ -194,11 +194,21 @@ export function autoShiftZones(zones: Zone[], extent: number, headroom: number):
   const pushes: Push[] = [];
   for (const g of glist) {
     const [ux, uy] = dirOf(g);
-    // armies face along the zone's local +h axis (−sin o, cos o); a facing with
-    // a positive component along the outward ray deploys staring at the map
-    // edge — flip it 180° (tilt preserved) so every zone faces inward
-    for (const z of g) if (Math.cos(z.o) * uy - Math.sin(z.o) * ux > 0)
-      z.o = (z.o + Math.PI) % (2 * Math.PI);   // unrounded: serialize rounds, and a rounded π skews halfExtents
+    // armies face along the zone's local +h axis (−sin o, cos o). Aim at the
+    // OPPOSING alliance's centroid (same block) and flip 180° (tilt preserved —
+    // rectangles never spin) when the facing points away from it. Blocks with
+    // no opponent fall back to not-staring-at-the-map-edge.
+    // ponytail: flip-only — a facing authored ~90° off stays sideways; full
+    // re-aiming would rotate the deployment rectangles themselves
+    const foes = zones.filter(z => z.block === g[0].block && z.alliance !== g[0].alliance);
+    let fx = 0, fy = 0;
+    for (const f of foes) { fx += f.x0!; fy += f.y0!; }
+    if (foes.length) { fx /= foes.length; fy /= foes.length; }
+    for (const z of g) {
+      const tx = foes.length ? fx - z.x0! : -ux, ty = foes.length ? fy - z.y0! : -uy;
+      if (Math.cos(z.o) * ty - Math.sin(z.o) * tx < 0)
+        z.o = (z.o + Math.PI) % (2 * Math.PI);   // unrounded: serialize rounds, and a rounded π skews halfExtents
+    }
     let t = Infinity;
     for (const z of g) {
       const [hx, hy] = halfExtents(z);

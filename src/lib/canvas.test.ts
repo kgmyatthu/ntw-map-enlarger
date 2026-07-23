@@ -157,21 +157,18 @@ describe("makeThumb", () => {
     expect(strokeStyles).toEqual(["#8a9a78"]);
   });
 
-  it("with colourBytes draws the flipped image (save/translate/scale/drawImage/restore)", async () => {
+  it("with colourBytes draws the image unflipped (row 0 = +Z belongs at the top, like the game)", async () => {
     const restoreImage = stubImage();
     try {
       const { ctx } = installCtxStub();
       const url = await makeThumb(new Uint8Array([1, 2, 3]) as Uint8Array<ArrayBuffer>, null, null, 1024);
 
       expect(url).toBe("data:image/png;base64,stub");
-      expect(ctx.save).toHaveBeenCalledTimes(1);
-      expect(ctx.translate).toHaveBeenCalledWith(0, 220);
-      expect(ctx.scale).toHaveBeenCalledWith(1, -1);
+      expect(ctx.scale).not.toHaveBeenCalled();   // no mirror flip of the image
       expect(ctx.drawImage).toHaveBeenCalledTimes(1);
       const [img, dx, dy, dw, dh] = ctx.drawImage.mock.calls[0];
       expect(img).toBeTruthy();
       expect([dx, dy, dw, dh]).toEqual([0, 0, 220, 220]);
-      expect(ctx.restore).toHaveBeenCalledTimes(1);
     } finally {
       restoreImage();
     }
@@ -244,15 +241,15 @@ describe("makeThumb", () => {
     // zone 1: translate to its thumb centre, rotate 0, stroke centred on origin
     const S = 220;
     expect(ctx.translate.mock.calls[0]).toEqual([(0 / extent + 0.5) * S, (0 / extent + 0.5) * S]);
-    expect(ctx.rotate.mock.calls[0][0]).toBe(0);
+    expect(ctx.rotate.mock.calls[0][0]).toBeCloseTo(0);   // -0 from the mirror negation
     const [a, b, w, h] = ctx.strokeRect.mock.calls[0];
     expect(a).toBeCloseTo((-100 / 2 / extent) * S);
     expect(b).toBeCloseTo((-50 / 2 / extent) * S);
     expect(w).toBeCloseTo((100 / extent) * S);
     expect(h).toBeCloseTo((50 / extent) * S);
 
-    // zone 2 rotates by its orientation
-    expect(ctx.rotate.mock.calls[1][0]).toBeCloseTo(Math.PI / 2);
+    // zone 2 rotates by its NEGATED orientation (mirrored screen y)
+    expect(ctx.rotate.mock.calls[1][0]).toBeCloseTo(-Math.PI / 2);
     expect(ctx.save).toHaveBeenCalledTimes(2);
     expect(ctx.restore).toHaveBeenCalledTimes(2);
   });

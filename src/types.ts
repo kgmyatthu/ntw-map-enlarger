@@ -31,6 +31,30 @@ export interface LoadedTreeList extends TreeList {
   path: string;
 }
 
+// ---------- .building_list codec ----------
+export interface Building {
+  name: string;
+  x: number;
+  z: number;
+  /** rotation, 65536 = 360° */
+  rot: number;
+  /** trailing node bytes after the angle (some files carry an 0x0A f32) — byte-preserved */
+  extra: Uint8Array;
+}
+
+export interface BuildingList {
+  /** first 0x24 bytes (magic, tag, node headers) — byte-preserved */
+  header: Uint8Array;
+  records: Building[];
+  /** name table from names_off to EOF — byte-preserved */
+  nameTable: Uint8Array;
+}
+
+/** Building list as held in viewer state: parsed from a concrete archive path. */
+export interface LoadedBuildingList extends BuildingList {
+  path: string;
+}
+
 // ---------- DDS heightmap ----------
 export interface HeightMap {
   w: number;
@@ -96,6 +120,9 @@ export interface Bundle {
   extent: number;
   origScale: string | null;
   scaleSet?: string | null;
+  /** heightmap bias before / after the auto enlarge shift (null: no bias attribute) */
+  origBias?: string | null;
+  biasSet?: string | null;
 }
 
 // ---------- undo ----------
@@ -110,12 +137,13 @@ export type UndoAction =
   | { type: "fill"; addedPer: number[] }
   | { type: "zone-move"; zi: number; x: number; y: number; w: number; h: number; o: number; x0: number | undefined; y0: number | undefined }
   | { type: "tree-add"; si: number; n: number }
-  | { type: "erase"; removed: RemovedTree[] };
+  | { type: "erase"; removed: RemovedTree[] }
+  | { type: "bldg-move"; li: number; ri: number; x: number; z: number };
 
 // ---------- UI literal unions ----------
-export type Tool = "pan" | "place" | "brush" | "erase" | "zones";
+export type Tool = "pan" | "place" | "brush" | "erase" | "zones" | "bldg";
 export type FillAlgo = "cluster" | "colour" | "uniform" | "spaced";
-export type LayerKey = "colour" | "alpha" | "height" | "trees" | "deploy";
+export type LayerKey = "colour" | "alpha" | "height" | "trees" | "bldg" | "deploy";
 export type LayerState = Record<LayerKey, boolean>;
 export type ZoneField = "x" | "y" | "w" | "h";
 
@@ -136,9 +164,11 @@ export interface View {
  * `panning` / `zone` / `painting` (the code tests them with `?.`).
  */
 export type DragState =
-  | { panning: true; sx: number; sz: number; cx: number; cz: number; zone?: undefined; painting?: undefined }
-  | { zone: number; mode?: "resize" | "rotate"; ox: number; oy: number; wx0: number; wz0: number; panning?: undefined; painting?: undefined }
-  | { painting: true; last: [number, number]; panning?: undefined; zone?: undefined };
+  | { panning: true; sx: number; sz: number; cx: number; cz: number; zone?: undefined; painting?: undefined; bldg?: undefined; pan3?: undefined }
+  | { zone: number; mode?: "resize" | "rotate"; ox: number; oy: number; wx0: number; wz0: number; panning?: undefined; painting?: undefined; bldg?: undefined; pan3?: undefined }
+  | { painting: true; last: [number, number]; panning?: undefined; zone?: undefined; bldg?: undefined; pan3?: undefined }
+  | { bldg: [number, number]; ox: number; oy: number; wx0: number; wz0: number; panning?: undefined; zone?: undefined; painting?: undefined; pan3?: undefined }
+  | { pan3: true; sx: number; sz: number; cx: number; cz: number; panning?: undefined; zone?: undefined; painting?: undefined; bldg?: undefined };
 
 // ---------- styles ----------
 /** The S style object: plain CSSProperties plus state-dependent factories. */

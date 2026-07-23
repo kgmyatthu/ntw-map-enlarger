@@ -11,7 +11,7 @@ function makeCtx(cv: HTMLCanvasElement): CanvasRenderingContext2D {
     canvas: cv,
     fillRect: noop, strokeRect: noop, clearRect: noop, fillText: noop,
     save: noop, restore: noop, translate: noop, scale: noop, rotate: noop,
-    beginPath: noop, arc: noop, fill: noop, stroke: noop, setLineDash: noop,
+    beginPath: noop, closePath: noop, arc: noop, fill: noop, stroke: noop, setLineDash: noop,
     moveTo: noop, lineTo: noop,
     drawImage: noop, putImageData: noop,
     createImageData: imageData,

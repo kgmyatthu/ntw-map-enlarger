@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo,
-  makeColourWeight, makeRoadMask, fillSpecies,
+  makeColourWeight, makeRoadMask, makeDepressionSampler, makeBuildingMask, fillSpecies,
 } from "./edit";
 import type { Species, Tree, Zone, TreeList, Deployment, View } from "../types";
 
@@ -40,13 +40,13 @@ const deployment = (zones: Zone[]): Deployment =>
 // ---------- w2s / s2w ----------
 
 describe("w2s / s2w", () => {
-  it("maps world centre to screen centre and scales offsets by zoom", () => {
+  it("maps world centre to screen centre; +z goes UP the screen (game orientation)", () => {
     const v: View = { zoom: 2, cx: 10, cz: 20 };
     expect(w2s(v, 10, 20, 400, 300)).toEqual([200, 150]);
-    // +5 world in each axis -> +5*zoom screen px
-    expect(w2s(v, 15, 25, 400, 300)).toEqual([210, 160]);
+    // +5 world x -> +5*zoom right; +5 world z -> 5*zoom UP (mirrored like the game)
+    expect(w2s(v, 15, 25, 400, 300)).toEqual([210, 140]);
     // s2w respects zoom/centre too
-    expect(s2w(v, 210, 160, 400, 300)).toEqual([15, 25]);
+    expect(s2w(v, 210, 140, 400, 300)).toEqual([15, 25]);
     expect(s2w(v, 200, 150, 400, 300)).toEqual([10, 20]);
   });
 
@@ -334,6 +334,54 @@ describe("makeRoadMask", () => {
     expect(road(499, 499)).toBe(true);     // water
     expect(road(0, 0)).toBe(false);        // grass
     expect(road(-499, -499)).toBe(false);  // dark grass variant, still plantable
+  });
+
+  it("plants ONLY on greenish ground types — every other ink is no-plant, like the road rule", () => {
+    const one = (r: number, g: number, b: number) => makeRoadMask(new Uint8ClampedArray([r, g, b, 255]), 1, 1, 100)(0, 0);
+    expect(one(60, 120, 50)).toBe(false);    // grass
+    expect(one(40, 80, 30)).toBe(false);     // dark forest floor
+    expect(one(100, 110, 40)).toBe(false);   // olive field
+    expect(one(0, 0, 0)).toBe(true);         // road ink
+    expect(one(40, 80, 140)).toBe(true);     // blue water
+    expect(one(40, 110, 120)).toBe(true);    // teal water
+    expect(one(150, 100, 60)).toBe(true);    // muddy water / bare dirt
+    expect(one(140, 60, 150)).toBe(true);    // violet water
+    expect(one(120, 120, 120)).toBe(true);   // neutral grey: not greenish, no trees
+  });
+
+  it("carved stream beds mask even under green paint (depression bonus)", () => {
+    const grass = new Uint8ClampedArray([60, 120, 50, 255]);
+    expect(makeRoadMask(grass, 1, 1, 100, () => 0.05)(0, 0)).toBe(true);    // carved
+    expect(makeRoadMask(grass, 1, 1, 100, () => 0)(0, 0)).toBe(false);      // level green
+    expect(makeRoadMask(grass, 1, 1, 100)(0, 0)).toBe(false);               // no sampler
+  });
+});
+
+// ---------- makeBuildingMask ----------
+
+describe("makeBuildingMask", () => {
+  it("masks within 20 m of a building, including hash cells straddling the origin", () => {
+    const bm = makeBuildingMask([{ x: 0, z: 0 }, { x: 500, z: -300 }]);
+    expect(bm(5, 5)).toBe(true);
+    expect(bm(-14, 14)).toBe(true);     // 19.8 m away, across the 0-straddling cells
+    expect(bm(0, 25)).toBe(false);      // 25 m: outside the clearing
+    expect(bm(505, -310)).toBe(true);
+    expect(bm(450, -300)).toBe(false);
+  });
+});
+
+// ---------- makeDepressionSampler ----------
+
+describe("makeDepressionSampler", () => {
+  const flat = (v: number) => new Float32Array(64).fill(v);
+  it("carved channel positive, flat ground zero, a ridge negative — all local, no global level", () => {
+    const carved = flat(0.5); for (let y = 0; y < 8; y++) carved[y * 8 + 2] = 0.4;
+    const ridged = flat(0.5); for (let y = 0; y < 8; y++) ridged[y * 8 + 2] = 0.6;
+    const dc = makeDepressionSampler({ w: 8, h: 8, px: carved }, 600);   // r=2 -> 5×5 window
+    const dr = makeDepressionSampler({ w: 8, h: 8, px: ridged }, 600);
+    expect(dc(-112.5, -37.5)).toBeCloseTo(0.08, 3);    // bed sits 0.08 below its window mean
+    expect(dc(112.5, -37.5)).toBeCloseTo(0, 6);        // flat field far from the channel
+    expect(dr(-112.5, -37.5)).toBeCloseTo(-0.08, 3);   // ridge sits above its surroundings
   });
 });
 

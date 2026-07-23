@@ -140,17 +140,17 @@ describe("readDDS", () => {
     for (let i = 0; i < 4; i++) expect(hm.px[i]).toBeCloseTo(1 / 255, 6);
   });
 
-  it("unknown bits value falls through to the 4-byte-stride branch", () => {
-    // build a 32-bit layout then overwrite the bits field with 64
-    const vals = [9, 90, 180, 255];
-    const dds = makeDDS(2, 2, 32, i => vals[i]);
-    new DataView(dds.buffer).setUint32(88, 64, true);
-    const hm = readDDS(dds.buffer);
-    expect(hm.w).toBe(2);
-    expect(hm.h).toBe(2);
-    for (let i = 0; i < vals.length; i++) {
-      expect(hm.px[i]).toBeCloseTo(vals[i] / 255, 6);
-    }
+  it("throws on FourCC/compressed (bits 0) and unknown bit depths instead of decoding noise", () => {
+    const dds = makeDDS(2, 2, 32);
+    new DataView(dds.buffer).setUint32(88, 0, true);    // FourCC/DXT: RGBBitCount = 0
+    expect(() => readDDS(dds.buffer)).toThrow("unsupported dds");
+    new DataView(dds.buffer).setUint32(88, 64, true);   // unknown depth
+    expect(() => readDDS(dds.buffer)).toThrow("unsupported dds");
+  });
+
+  it("throws on a truncated payload instead of yielding NaN heights", () => {
+    const dds = makeDDS(4, 4, 24);
+    expect(() => readDDS(dds.buffer.slice(0, dds.length - 3))).toThrow("unsupported dds");
   });
 
   it("non-square 16-bit image: w and h not swapped, all pixels read", () => {
@@ -189,4 +189,5 @@ describe("readDDS", () => {
     const hm = readDDS(makeDDS(2, 2, 8).buffer);
     expect(hm.px).toBeInstanceOf(Float32Array);
   });
+
 });

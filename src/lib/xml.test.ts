@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scaleAttr, setScale, baseTerrainWidth, patchGridFx } from "./xml";
+import { scaleAttr, setScale, shiftBias, baseTerrainWidth, patchGridFx } from "./xml";
 
 describe("scaleAttr", () => {
   it("scales matching attributes and leaves others alone", () => {
@@ -16,6 +16,21 @@ describe("baseTerrainWidth", () => {
 describe("setScale", () => {
   it("rewrites every scale attribute", () => {
     expect(setScale("<a scale='1.5'/><b scale='-2'/>", "3")).toBe("<a scale='3'/><b scale='3'/>");
+  });
+});
+
+describe("shiftBias", () => {
+  it("negative bias sinks by the enlargement fraction: -5 x1.5 -> -7.5, x2 -> -10", () => {
+    expect(shiftBias("<height_map scale='0.6' bias='-5.0'/>", 1.5)).toBe("<height_map scale='0.6' bias='-7.500000'/>");
+    expect(shiftBias("<h bias='-5.0'/>", 2)).toBe("<h bias='-10.000000'/>");
+  });
+  it("positive bias sinks toward zero: 5 x1.5 -> 2.5, x2 -> 0", () => {
+    expect(shiftBias("<h bias='5.0'/>", 1.5)).toBe("<h bias='2.500000'/>");
+    expect(shiftBias("<h bias='5.0'/>", 2)).toBe("<h bias='0.000000'/>");
+  });
+  it("no bias attribute: untouched; scale attr not mistaken for bias", () => {
+    const xml = "<height_map world_width='1024.000000' scale='0.600000'/>";
+    expect(shiftBias(xml, 2)).toBe(xml);
   });
 });
 

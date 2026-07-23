@@ -4,7 +4,8 @@ import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "
 import { parseTreeList, buildTreeList } from "./treeList";
 import { parseDeployment, serializeDeployment } from "./deployment";
 import type { FileStore, LoadedDeployment, LoadedTreeList } from "../types";
-import { DEF_XML, HEIGHT_XML, DEPLOY_XML, defaultTreeListBuf, buildTreeListBuf, makeDDS, makeMapZip } from "../test/fixtures";
+import { DEF_XML, HEIGHT_XML, DEPLOY_XML, defaultTreeListBuf, buildTreeListBuf, buildBuildingListBuf, makeDDS, makeMapZip } from "../test/fixtures";
+import { parseBuildingList } from "./buildingList";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -118,6 +119,43 @@ describe("loadZipStore", () => {
     expect(store.has("mymap/bmd.tree_list")).toBe(true);
     expect(store.has("mymap/deployment_areas.xml")).toBe(true);
     expect(store.has("mymap/colour_map_0.png")).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------ enlargeStore: building lists
+
+describe("enlargeStore building_list handling", () => {
+  it("scales building coords by the factor; CSV under the extension passes through untouched", () => {
+    const bl = buildBuildingListBuf([{ name: "barn_v1", x: 100, z: -50.5, rot: 7 }]);
+    const csv = new TextEncoder().encode("﻿barn,1,2,0\n") as Uint8Array<ArrayBuffer>;
+    const store = makeStore({
+      "m/definition.xml": DEF_XML,
+      "m/bmd_near_buildings.building_list": bl,
+      "m/building.building_list": csv,
+    });
+    const r = enlargeStore(store, "m/definition.xml", 2, 100);
+    const v = r.out.get("m/bmd_near_buildings.building_list")!;
+    const out = parseBuildingList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+    expect(out.records[0].x).toBe(200);
+    expect(out.records[0].z).toBe(-101);
+    expect(out.records[0].rot).toBe(7);         // rotation untouched by enlarge
+    expect(r.nBldg).toBe(1);
+    expect(r.out.get("m/building.building_list")).toBe(csv);   // unparseable: byte-identical passthrough
+  });
+
+  it("multi-map zip: sibling maps' building lists pass through byte-identical, not scaled", () => {
+    const mine = buildBuildingListBuf([{ name: "barn_v1", x: 100, z: 50 }]);
+    const sibling = buildBuildingListBuf([{ name: "hut_v1", x: 10, z: 20 }]);
+    const store = makeStore({
+      "mymap/definition.xml": DEF_XML,
+      "mymap/bmd_near_buildings.building_list": mine,
+      "otherMap/bmd_near_buildings.building_list": sibling,
+    });
+    const r = enlargeStore(store, "mymap/definition.xml", 2, 100);
+    expect(r.out.get("otherMap/bmd_near_buildings.building_list")).toBe(sibling);   // untouched
+    expect(r.nBldg).toBe(1);   // sibling records not counted either
+    const v = r.out.get("mymap/bmd_near_buildings.building_list")!;
+    expect(parseBuildingList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)).records[0].x).toBe(200);
   });
 });
 

@@ -2,15 +2,18 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import JSZip from "jszip";
 import type {
-  LoadedTreeList, LoadedDeployment, FileStore, Bundle, UndoAction, Tool, FillAlgo,
-  LayerState, Entity, View, DragState, Styles,
+  LoadedTreeList, LoadedDeployment, LoadedBuildingList, FileStore, Bundle, UndoAction, Tool, FillAlgo,
+  LayerState, Entity, View, DragState, Styles, HeightMap,
 } from "./types";
 import { parseTreeList, buildTreeList } from "./lib/treeList";
+import { parseBuildingList } from "./lib/buildingList";
 import { readDDS, readTGA } from "./lib/dds";
 import { parseDeployment, serializeDeployment, autoShiftZones, zonesOverlap, zoneInBounds } from "./lib/deployment";
-import { setScale, baseTerrainWidth, worldWidth, patchGridFx } from "./lib/xml";
-import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, makeRoadMask, fillSpecies } from "./lib/edit";
+import { setScale, shiftBias, baseTerrainWidth, worldWidth, patchGridFx } from "./lib/xml";
+import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, makeRoadMask, makeDepressionSampler, makeBuildingMask, DEP_BARE, fillSpecies } from "./lib/edit";
 import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "./lib/store";
+import { buildTerrain, bucketTrees, bucketBuildings, bldgCat, BLDG_CATS, render3d } from "./lib/view3d";
+import type { Terrain } from "./lib/view3d";
 import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir, pickExportDir, SP_COLORS } from "./lib/canvas";
 
 // =====================================================================
@@ -33,7 +36,10 @@ export default function MapEnlarger() {
   const [colourImg, setColourImg] = useState<HTMLImageElement | null>(null);
   const [alphaImg, setAlphaImg] = useState<HTMLImageElement | HTMLCanvasElement | null>(null);
   const [hmCanvas, setHmCanvas] = useState<HTMLCanvasElement | null>(null);
+  const [hmData, setHmData] = useState<HeightMap | null>(null);
+  const [mode3d, setMode3d] = useState(false);
   const [trees, setTrees] = useState<LoadedTreeList | null>(null);
+  const [blds, setBlds] = useState<LoadedBuildingList[]>([]);
   const [deploy, setDeploy] = useState<LoadedDeployment | null>(null);
   const [blockIdx, setBlockIdx] = useState(0);
   const [selZone, setSelZone] = useState<number | null>(null);
@@ -50,7 +56,7 @@ export default function MapEnlarger() {
   const [curBundle, setCurBundle] = useState<number | null>(null);
   const [fillAlgo, setFillAlgo] = useState<FillAlgo>("cluster");
   const [fillN, setFillN] = useState("");
-  const [layer, setLayer] = useState<LayerState>({ colour: true, alpha: false, height: true, trees: true, deploy: true });
+  const [layer, setLayer] = useState<LayerState>({ colour: true, alpha: false, height: true, trees: true, bldg: true, deploy: true });
   const [tool, setTool] = useState<Tool>("pan");
   const [entity, setEntity] = useState<Entity>({ kind: "tree", idx: 0 });
   const [brushR, setBrushR] = useState(60);
@@ -63,6 +69,12 @@ export default function MapEnlarger() {
   const srcFiles = useRef<File[]>([]);   // original zips, kept so the factor can be switched after import
   const thumbTimer = useRef<number | undefined>(undefined);
   const view = useRef<View>({ zoom: 0.16, cx: 0, cz: 0 });
+  const loadGen = useRef(0);   // bumped per loadStore; async image onloads from older maps bail out
+  const cam3 = useRef({ yaw: 0.65, pitch: 1.0, zoom: 1, cx: 0, cz: 0 });
+  const t3 = useRef<Terrain | null>(null);
+  const buckets3 = useRef<Map<number, number[][]> | null>(null);
+  const bucketsB = useRef<Map<number, number[][]> | null>(null);   // buildings, bucketed like trees
+  const raf3 = useRef(0);   // pending rAF id: 3D input coalesces redraws to display refresh
   const drag = useRef<DragState | null>(null);
   const cursor = useRef<[number, number] | null>(null);
   const undoRef = useRef<UndoAction[]>([]);
@@ -72,6 +84,7 @@ export default function MapEnlarger() {
   const imgExtent = baseSize;
 
   const loadStore = (store: FileStore, root: string, displayName: string, processedFactor: number, depOverride: LoadedDeployment | null) => {
+    const gen = ++loadGen.current;
     const get = (n: string) => findFile(store, root, n);
 
     const def = get("definition.xml");
@@ -91,8 +104,12 @@ export default function MapEnlarger() {
     let ci: { p: string; v: Uint8Array<ArrayBuffer> } | null = null;
     for (const n of ["colour_map_0.JPG", "colour_map_0.jpg", "colour_map_0.png"]) { ci = get(n); if (ci) break; }
     if (ci) {
+      // clear synchronously: a bundle switch in 3D must not bake the OLD map's
+      // colours over the new heightmap while the new image decodes (and the
+      // expensive texture bake then runs once, not twice)
+      setColourImg(null);
       const im = new Image();
-      im.onload = () => { setColourImg(im); rr(); };
+      im.onload = () => { if (loadGen.current !== gen) return; setColourImg(im); rr(); };
       im.src = URL.createObjectURL(new Blob([ci.v]));
     } else setColourImg(null);
 
@@ -117,16 +134,25 @@ export default function MapEnlarger() {
     } else setAlphaImg(null);
 
     let hm = get("height_map_0.dds");
-    if (hm) setHmCanvas(heightToCanvas(readDDS(hm.v.buffer.slice(hm.v.byteOffset, hm.v.byteOffset + hm.v.byteLength))));
-    else {
+    if (hm) {
+      try {
+        const hd = readDDS(hm.v.buffer.slice(hm.v.byteOffset, hm.v.byteOffset + hm.v.byteLength));
+        setHmCanvas(heightToCanvas(hd)); setHmData(hd);
+      } catch { setHmCanvas(null); setHmData(null); }   // compressed/truncated dds: skip the height layer
+    } else {
       hm = get("height_map_0.png");
+      setHmData(null);
       if (hm) {
         const im = new Image();
         im.onload = () => {
+          if (loadGen.current !== gen) return;   // a newer map was loaded while this decoded
           const cv = document.createElement("canvas"); cv.width = im.width; cv.height = im.height;
           const cx = cv.getContext("2d")!; // fresh canvas: 2d context is always available
           cx.filter = "grayscale(1)"; cx.drawImage(im, 0, 0);
-          setHmCanvas(cv); rr();
+          const d = cx.getImageData(0, 0, cv.width, cv.height).data;
+          const px = new Float32Array(cv.width * cv.height);
+          for (let i = 0; i < px.length; i++) px[i] = d[i * 4] / 255;
+          setHmCanvas(cv); setHmData({ w: cv.width, h: cv.height, px }); rr();
         };
         im.src = URL.createObjectURL(new Blob([hm.v]));
       } else setHmCanvas(null);
@@ -134,6 +160,13 @@ export default function MapEnlarger() {
 
     const tl = get("bmd.tree_list");
     setTrees(tl && tl.v.length > 40 ? { ...parseTreeList(tl.v.buffer.slice(tl.v.byteOffset, tl.v.byteOffset + tl.v.byteLength)), path: tl.p } : null);
+    const bl: LoadedBuildingList[] = [];
+    for (const [p, v] of store) {
+      if (!/\.building_list$/i.test(p) || (root && !p.startsWith(root))) continue;   // this map's lists only
+      try { bl.push({ ...parseBuildingList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)), path: p }); }
+      catch { /* CSV/foreign files under this extension stay untouched passthrough */ }
+    }
+    setBlds(bl);
     const dpf = get("deployment_areas.xml");
     if (depOverride) setDeploy(depOverride);
     else if (dpf) {
@@ -142,11 +175,12 @@ export default function MapEnlarger() {
     } else setDeploy(null);
     setBlockIdx(0); setSelZone(null);
 
+    cam3.current.cx = 0; cam3.current.cz = 0;   // a panned-away target on the next map would show empty ground
     setFiles(store);
     setEnlarged(!!processedFactor);
     setAppliedF(processedFactor || 1);
     undoRef.current = [];
-    setStatus(`Loaded ${store.size} files, base terrain ${bs} m. ${tl ? "trees ✓" : "no trees"}${dpf ? ", deployment ✓" : ""}.${gtNote}`);
+    setStatus(`Loaded ${store.size} files, base terrain ${bs} m. ${tl ? "trees ✓" : "no trees"}${dpf ? ", deployment ✓" : ""}.${bl.length ? ` · ${bl.reduce((a, b) => a + b.records.length, 0)} buildings ✓` : ""}${gtNote}`);
   };
 
   const applyScale = (v: string) => {
@@ -184,7 +218,7 @@ export default function MapEnlarger() {
   const undo = () => {
     const a = undoRef.current.pop();
     if (!a) return;
-    applyUndo(a, trees, deploy);
+    applyUndo(a, trees, deploy, blds);
     if (a.type === "fill") refreshCurThumb();
     rr();
   };
@@ -203,24 +237,50 @@ export default function MapEnlarger() {
   };
 
   // roads live in the paletted ground_type_map image (black pixels) — never plant on them.
+  // Water = below the map's own water plane (raw height×scale + bias < 0), plus the
+  // colour heuristics: blue-dominant ground-type pixels on low ground.
   // Returns the reason alongside so failures surface in the UI instead of vanishing.
+  // roads + water live in the ground_type_map: dark ink = roads/rivers, bluish ink = water —
+  // cross-checked against LOCAL heightmap depressions (carved beds), not any global level.
+  // Placed buildings mask a 20 m clearing too. Returns the reason alongside so failures
+  // surface in the UI instead of vanishing.
   const roadFromStore = async (st: FileStore, extent: number): Promise<{ road: ((wx: number, wz: number) => boolean) | null; note: string }> => {
+    let depFn: ((wx: number, wz: number) => number) | null = null;
+    const hk = [...st.keys()].find(p => /(^|\/)height_map_0\.dds$/i.test(p));
+    if (hk) {
+      const v = st.get(hk)!;
+      try { depFn = makeDepressionSampler(readDDS(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)), extent); }
+      catch { /* bad dds: depth checks stay off, road ink still masks */ }
+    }
+    const bpts: { x: number; z: number }[] = [];
+    for (const [p, v] of st) {
+      if (!/\.building_list$/i.test(p)) continue;
+      try { bpts.push(...parseBuildingList(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength)).records); }
+      catch { /* foreign file: no mask from it */ }
+    }
+    const bm = bpts.length ? makeBuildingMask(bpts) : null;
+    // every returned mask also refuses the clearing around buildings
+    const plus = (f: ((wx: number, wz: number) => boolean) | null) =>
+      f && bm ? (wx: number, wz: number) => f(wx, wz) || bm(wx, wz) : f ?? bm;
+    const df = depFn, wNote = (df ? "+local-depth" : "") + (bm ? "+bldg" : "");
     const key = [...st.keys()].find(p => GT_RE.test(p));
-    if (!key) return { road: null, note: "no ground_type_map" };
+    if (!key) return df
+      ? { road: plus((wx, wz) => df(wx, wz) > DEP_BARE), note: `depression mask ✓ (no ground_type_map)${bm ? "+bldg" : ""}` }
+      : { road: plus(null), note: bm ? "building mask ✓ (no ground_type_map)" : "no ground_type_map" };
     if (/\.tga$/i.test(key)) {
       try {
         const t = readTGA(st.get(key)!);
-        return { road: makeRoadMask(t.data, t.w, t.h, extent), note: `road mask ✓ ${t.w}×${t.h}` };
-      } catch (e) { return { road: null, note: `road mask FAILED: ${(e as Error).message}` }; }
+        return { road: plus(makeRoadMask(t.data, t.w, t.h, extent, df)), note: `road+water ✓ ${t.w}×${t.h}${wNote}` };
+      } catch (e) { return { road: plus(df && ((wx, wz) => df(wx, wz) > DEP_BARE)), note: `road mask FAILED: ${(e as Error).message}` }; }
     }
     const img = await new Promise<HTMLImageElement | null>(res => {
       const im = new Image();
       im.onload = () => res(im); im.onerror = () => res(null);
       im.src = URL.createObjectURL(new Blob([st.get(key)!]));
     });
-    if (!img) return { road: null, note: "road mask FAILED: image decode" };
+    if (!img) return { road: plus(df && ((wx, wz) => df(wx, wz) > DEP_BARE)), note: "road mask FAILED: image decode" };
     const S = img.width || 1024;   // native resolution: the road image's own pixels, no resample
-    return { road: makeRoadMask(sampleImage(img, S), S, S, extent), note: `road mask ✓ ${S}×${S}` };
+    return { road: plus(makeRoadMask(sampleImage(img, S), S, S, extent, df)), note: `road+water ✓ ${S}×${S}${wNote}` };
   };
 
   const fillTrees = async () => {
@@ -249,7 +309,7 @@ export default function MapEnlarger() {
   // write the currently-viewed map's live edits back into its bundle
   const syncCurrent = () => {
     if (curBundle === null || !bundles[curBundle] || !files) return;
-    syncStore(bundles[curBundle].store, xmlRef.current, trees, deploy);
+    syncStore(bundles[curBundle].store, xmlRef.current, trees, deploy, blds);
   };
 
   const bulkExport = async () => {
@@ -349,12 +409,17 @@ export default function MapEnlarger() {
         const r = enlargeStore(store, defPath, fac, headroom);
         // auto on import: xfactor height scale + one cluster fill pass, baked into the store
         const enc = new TextEncoder(), dec = new TextDecoder();
-        let scaleSet: string | null = null;
-        if (r.origScale) {
-          scaleSet = (parseFloat(r.origScale) * fac).toFixed(6);
-          for (const p of [...r.out.keys()]) {
-            if (/height_map_\d_settings\.xml$/.test(p)) r.out.set(p, enc.encode(setScale(dec.decode(r.out.get(p)!), scaleSet)));
-          }
+        let scaleSet: string | null = null, origBias: string | null = null, biasSet: string | null = null;
+        if (r.origScale) scaleSet = (parseFloat(r.origScale) * fac).toFixed(6);
+        for (const p of [...r.out.keys()]) {
+          if (!/height_map_\d_settings\.xml$/.test(p)) continue;
+          let x = dec.decode(r.out.get(p)!);
+          if (scaleSet) x = setScale(x, scaleSet);
+          const lod0 = /height_map_0_settings\.xml$/.test(p);
+          if (lod0) origBias = /\bbias='([0-9.\-]+)'/.exec(x)?.[1] ?? null;
+          x = shiftBias(x, fac);   // bias sinks with the enlargement: b - |b|*(f-1)
+          if (lod0) biasSet = /\bbias='([0-9.\-]+)'/.exec(x)?.[1] ?? null;
+          r.out.set(p, enc.encode(x));
         }
         let auto = 0, roadNote = "";
         const tKey = [...r.out.keys()].find(p => p.endsWith("bmd.tree_list"));
@@ -388,9 +453,9 @@ export default function MapEnlarger() {
         newBundles.push({
           name: f.name.replace(/\.zip$/i, ""), store: r.out, origThumb, root: r.root, factor: fac, exported: false,
           thumb, nTrees: r.nTrees, nZones: r.nZones, dep: r.dep, depPath: r.depPath,
-          colourBytes: r.colourBytes, extent: r.extent, origScale: r.origScale, scaleSet,
+          colourBytes: r.colourBytes, extent: r.extent, origScale: r.origScale, scaleSet, origBias, biasSet,
         });
-        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto${r.cull ? `, ${r.cull} oob culled` : ""}), ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}${roadNote ? ", " + roadNote : ""}`);
+        log.push(`✓ ${f.name}: ×${fac}, ${r.nTrees} trees (${auto} auto${r.cull ? `, ${r.cull} oob culled` : ""})${r.nBldg ? `, ${r.nBldg} bldg` : ""}, ${r.nZones} zones +${r.shift}m, ${r.scaleNote}${scaleSet ? "→" + scaleSet : ""}${roadNote ? ", " + roadNote : ""}`);
       } catch (e) {
         // cast: everything thrown here (JSZip failures, our own throws) is an Error
         log.push(`✗ ${f.name}: ${(e as Error).message}`);
@@ -426,7 +491,7 @@ export default function MapEnlarger() {
   const doExport = async () => {
     if (!files) return;
     const zip = new JSZip();
-    for (const [p, v] of exportEntries(files, xmlRef.current, trees, deploy)) zip.file(p, v);
+    for (const [p, v] of exportEntries(files, xmlRef.current, trees, deploy, blds)) zip.file(p, v);
     const name = (mapName.replace(/ \[\d+\/\d+\]$/, "") || "map") + (enlarged ? "_" + mapSize : "") + ".zip";
     try { if (!await saveZip(zip, name)) return; }   // user cancelled
     catch (e) { setStatus(`Export failed: ${(e as Error).message}`); return; }
@@ -447,42 +512,47 @@ export default function MapEnlarger() {
     const ctx = cv.getContext("2d")!; // canvas 2d context is always available
     const cw = cv.width, ch = cv.height;
     ctx.fillStyle = "#12160f"; ctx.fillRect(0, 0, cw, ch);
+    if (mode3d && t3.current) {
+      // 3D relief follows the map's live height scale (auto ×factor + the height scale box).
+      // ponytail: 2 m per scale unit — THE knob if terrain reads too steep or too flat
+      const p = Object.keys(xmlRef.current).find(k => /height_map_0_settings\.xml$/.test(k));
+      const m = p ? /\bscale='([0-9.\-]+)'/.exec(xmlRef.current[p]) : null;
+      render3d(ctx, cw, ch, t3.current, cam3.current, mapSize, m ? parseFloat(m[1]) * 2.3 : 30, layer.trees ? buckets3.current : null, SP_COLORS, layer.colour,
+        layer.bldg ? bucketsB.current : null);
+      return;
+    }
     const half = mapSize / 2, ihalf = imgExtent / 2;
 
-    // image row 0 = world +Z (verified: existing trees land on forest pixels
-    // only with a vertical flip), so both image layers draw V-flipped.
-    const drawFlipped = (img: CanvasImageSource, a: number, b: number, c: number, d: number) => {
-      ctx.save();
-      ctx.translate(0, d);
-      ctx.scale(1, -1);
-      ctx.drawImage(img, a, 0, c - a, d - b);
-      ctx.restore();
-    };
+    // image row 0 = world +Z and the mirrored w2s puts +Z at the TOP of the screen,
+    // so images now draw unflipped — matching the in-game orientation.
+    // w2sc(-half,-half) is bottom-left on screen, w2sc(half,half) top-right.
+    const drawMap = (img: CanvasImageSource, a: number, b: number, c: number, d: number) =>
+      ctx.drawImage(img, a, d, c - a, b - d);
     {
       const [a, b] = w2sc(-half, -half, cw, ch), [c, d] = w2sc(half, half, cw, ch);
-      if (layer.height && hmCanvas) { ctx.imageSmoothingEnabled = true; drawFlipped(hmCanvas, a, b, c, d); }
-      else { ctx.fillStyle = "#222a1d"; ctx.fillRect(a, b, c - a, d - b); }
+      if (layer.height && hmCanvas) { ctx.imageSmoothingEnabled = true; drawMap(hmCanvas, a, b, c, d); }
+      else { ctx.fillStyle = "#222a1d"; ctx.fillRect(a, d, c - a, b - d); }
     }
     if (layer.colour && colourImg) {
       // with the grid.fx fix the colour/blend window spans the full terrain
       const [a, b] = w2sc(-half, -half, cw, ch), [c, d] = w2sc(half, half, cw, ch);
       ctx.globalAlpha = 0.9;
-      drawFlipped(colourImg, a, b, c, d);
+      drawMap(colourImg, a, b, c, d);
       ctx.globalAlpha = 1;
     }
     if (layer.alpha && alphaImg) {
       // road/alpha map overlay — what the auto-fill road mask sees
       const [a, b] = w2sc(-half, -half, cw, ch), [c, d] = w2sc(half, half, cw, ch);
       ctx.globalAlpha = 0.55;
-      drawFlipped(alphaImg, a, b, c, d);
+      drawMap(alphaImg, a, b, c, d);
       ctx.globalAlpha = 1;
     }
     const box = (hx: number, color: string, dash: number[], label: string) => {
       const [a, b] = w2sc(-hx, -hx, cw, ch), [c, d] = w2sc(hx, hx, cw, ch);
       ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash(dash);
-      ctx.strokeRect(a, b, c - a, d - b); ctx.setLineDash([]);
+      ctx.strokeRect(a, d, c - a, b - d); ctx.setLineDash([]);
       ctx.fillStyle = color; ctx.font = "11px ui-monospace, monospace";
-      ctx.fillText(label, a + 6, b + 14);
+      ctx.fillText(label, a + 6, d + 14);
     };
     if (enlarged) box(ihalf, "#c9b45f", [6, 4], `original extent ±${ihalf}`);
     box(half, "#8a9a78", [], `terrain ±${half}`);
@@ -500,6 +570,34 @@ export default function MapEnlarger() {
       });
       ctx.globalAlpha = 1;
     }
+    if (layer.bldg && blds.length) {
+      // building markers colour-coded by category (far lists faded). Below ~5 px the
+      // rotation is invisible, so draw plain rects — 1 canvas op instead of 6 for 10k+ lists
+      const bh = Math.max(3, 9 * view.current.zoom);
+      const rot = bh > 5;
+      for (const bl of blds) {
+        const far = /far/i.test(bl.path);
+        let lastCat = -1;
+        for (const bd of bl.records) {
+          const [bsx, bsz] = w2sc(bd.x, bd.z, cw, ch);
+          if (bsx < -20 || bsz < -20 || bsx > cw + 20 || bsz > ch + 20) continue;
+          const c = bldgCat(bd.name);
+          if (c !== lastCat) {   // records cluster by model, so style churn stays low
+            lastCat = c;
+            ctx.fillStyle = BLDG_CATS[c].col + (far ? "66" : "cc");
+            if (rot) { ctx.strokeStyle = BLDG_CATS[c].col; ctx.lineWidth = 1; }
+          }
+          if (rot) {
+            ctx.save();
+            ctx.translate(bsx, bsz);
+            ctx.rotate(-bd.rot / 65536 * 6.283);   // mirrored screen y
+            ctx.fillRect(-bh, -bh, bh * 2, bh * 2);
+            ctx.strokeRect(-bh, -bh, bh * 2, bh * 2);
+            ctx.restore();
+          } else ctx.fillRect(bsx - bh, bsz - bh, bh * 2, bh * 2);
+        }
+      }
+    }
     if (layer.deploy && deploy) {
       deploy.zones.forEach((z, zi) => {
         if (z.block !== blockIdx) return;
@@ -507,41 +605,55 @@ export default function MapEnlarger() {
         const zw = z.w * view.current.zoom, zh = z.h * view.current.zoom;
         ctx.save();
         ctx.translate(sx, sz);
-        ctx.rotate(z.o);
+        ctx.rotate(-z.o);   // mirrored screen y: world angles render negated
         const col = z.alliance === 0 ? "#6d9ee0" : "#e07d6d";
         ctx.fillStyle = col; ctx.globalAlpha = zi === selZone ? 0.35 : 0.18;
         ctx.fillRect(-zw / 2, -zh / 2, zw, zh);
         ctx.globalAlpha = 1;
         ctx.strokeStyle = col; ctx.lineWidth = zi === selZone ? 2.5 : 1.3;
         ctx.strokeRect(-zw / 2, -zh / 2, zw, zh);
-        // facing arrow: the deployed army faces the zone's local +h direction
-        // (verified on real maps: opposing alliances' orientations point at each other)
+        // facing arrow: the deployed army faces the zone's local +h direction —
+        // on the mirrored screen (rotate(-o), y flipped) that is local −y here
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(0, 0); ctx.lineTo(0, zh / 2 + 14);
-        ctx.moveTo(-5, zh / 2 + 8); ctx.lineTo(0, zh / 2 + 14); ctx.lineTo(5, zh / 2 + 8);
+        ctx.moveTo(0, 0); ctx.lineTo(0, -(zh / 2 + 14));
+        ctx.moveTo(-5, -(zh / 2 + 8)); ctx.lineTo(0, -(zh / 2 + 14)); ctx.lineTo(5, -(zh / 2 + 8));
         ctx.stroke();
         if (zi === selZone && tool === "zones") {
-          // corner resize handles + rotate knob, drawn in the zone's rotated frame
+          // corner resize handles + rotate knob (opposite side of the facing arrow)
           ctx.fillStyle = "#f0ecd8";
           for (const [hx, hy] of [[-zw / 2, -zh / 2], [zw / 2, -zh / 2], [zw / 2, zh / 2], [-zw / 2, zh / 2]])
             ctx.fillRect(hx - 4, hy - 4, 8, 8);
           ctx.strokeStyle = "#f0ecd8"; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(0, -zh / 2); ctx.lineTo(0, -zh / 2 - ROT_KNOB); ctx.stroke();
-          ctx.beginPath(); ctx.arc(0, -zh / 2 - ROT_KNOB, 5, 0, 6.283); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(0, zh / 2); ctx.lineTo(0, zh / 2 + ROT_KNOB); ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, zh / 2 + ROT_KNOB, 5, 0, 6.283); ctx.fill();
         }
         ctx.restore();
       });
     }
-    if (cursor.current && tool !== "pan") {
+    if (cursor.current && tool !== "pan" && tool !== "bldg") {
       const [sx, sz] = w2sc(cursor.current[0], cursor.current[1], cw, ch);
       const rr2 = tool === "place" ? 8 : brushR * view.current.zoom;
       ctx.strokeStyle = tool === "erase" ? "#e06d6d" : "#e8e3c9";
       ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(sx, sz, rr2, 0, 6.283); ctx.stroke(); ctx.setLineDash([]);
     }
-  }, [files, colourImg, alphaImg, hmCanvas, trees, deploy, blockIdx, selZone, enlarged, mapSize, imgExtent, layer, tool, brushR]);
+  }, [files, colourImg, alphaImg, hmCanvas, trees, blds, deploy, blockIdx, selZone, enlarged, mapSize, imgExtent, layer, tool, brushR, mode3d]);
 
+  // losing the heightmap (bundle switch to a map without one) must drop back to 2D,
+  // or the 2D scene renders while the input handlers still steer the invisible 3D camera
+  useEffect(() => { if (!hmData) setMode3d(false); }, [hmData]);
+  // 3D scene caches: terrain on data change; tree buckets every render (edits mutate species in place)
+  useEffect(() => {
+    // full-res drape: the colour image's own pixels (2048 cap bounds the texture at 16 MB)
+    const S = colourImg ? Math.min(colourImg.naturalWidth || 512, 2048) : 256;
+    t3.current = mode3d && hmData ? buildTerrain(hmData, colourImg ? sampleImage(colourImg, S) : null, S) : null;
+  }, [mode3d, hmData, colourImg]);
+  useEffect(() => {
+    buckets3.current = mode3d && trees && t3.current ? bucketTrees(trees.species, mapSize, t3.current.G) : null;
+    bucketsB.current = mode3d && blds.length && t3.current
+      ? bucketBuildings(blds.map(bl => ({ records: bl.records, far: /far/i.test(bl.path) })), mapSize, t3.current.G) : null;
+  });
   useEffect(() => { draw(); });
   useEffect(() => {
     const cv = canvasRef.current!;   // non-null: canvas is always mounted with the component
@@ -562,6 +674,29 @@ export default function MapEnlarger() {
     const sx = e.clientX - rect.left, sz = e.clientY - rect.top;
     const [wx, wz] = s2wc(sx, sz, cv.width, cv.height);
     cursor.current = [wx, wz];
+    if (mode3d && t3.current) {   // same gate as draw(): without terrain the canvas shows 2D
+      // left drag = orbit (yaw/pitch); MIDDLE drag = pan the camera target across the map
+      if (e.type === "mousedown") {
+        if (e.button === 1) {
+          e.preventDefault();   // stop the browser's middle-click autoscroll
+          drag.current = { pan3: true, sx, sz, cx: cam3.current.cx ?? 0, cz: cam3.current.cz ?? 0 };
+        } else drag.current = { panning: true, sx, sz, cx: cam3.current.yaw, cz: cam3.current.pitch };
+      } else if (e.type === "mousemove" && drag.current?.pan3) {
+        const c = cam3.current;
+        const sc3 = Math.min(cv.width, cv.height) / (mapSize * 1.45) * c.zoom;
+        const sp3 = Math.max(0.05, Math.sin(c.pitch)), cy3 = Math.cos(c.yaw), sy3 = Math.sin(c.yaw);
+        const drx = (sx - drag.current.sx) / sc3, drz = (sz - drag.current.sz) / (sc3 * sp3);
+        c.cx = drag.current.cx - (drx * cy3 + drz * sy3);   // terrain follows the cursor
+        c.cz = drag.current.cz - (drx * sy3 - drz * cy3);
+        if (!raf3.current) raf3.current = requestAnimationFrame(() => { raf3.current = 0; draw(); });
+      } else if (e.type === "mousemove" && drag.current?.panning) {
+        cam3.current.yaw = drag.current.cx + (sx - drag.current.sx) * 0.008;
+        cam3.current.pitch = Math.min(1.5, Math.max(0.2, drag.current.cz + (sz - drag.current.sz) * 0.006));
+        // mousemove can outpace the display; render at most once per frame
+        if (!raf3.current) raf3.current = requestAnimationFrame(() => { raf3.current = 0; draw(); });
+      } else if (e.type !== "mousemove") drag.current = null;
+      return;
+    }
     if (e.type === "mousedown") {
       if (e.button !== 0 || tool === "pan" || e.shiftKey) drag.current = { sx, sz, cx: view.current.cx, cz: view.current.cz, panning: true };
       else if (tool === "zones") {
@@ -571,10 +706,10 @@ export default function MapEnlarger() {
         if (zs && zs.block === blockIdx) {
           const [zsx, zsz] = w2sc(zs.x, zs.y, cv.width, cv.height);
           const zw = zs.w * view.current.zoom, zh = zs.h * view.current.zoom;
-          const local = (lx: number, lz: number): [number, number] =>
-            [zsx + lx * Math.cos(zs.o) - lz * Math.sin(zs.o), zsz + lx * Math.sin(zs.o) + lz * Math.cos(zs.o)];
+          const local = (lx: number, lz: number): [number, number] =>   // matches the rotate(-o) mirrored draw
+            [zsx + lx * Math.cos(zs.o) + lz * Math.sin(zs.o), zsz - lx * Math.sin(zs.o) + lz * Math.cos(zs.o)];
           const snap = () => undoRef.current.push({ type: "zone-move", zi: selZone!, x: zs.x, y: zs.y, w: zs.w, h: zs.h, o: zs.o, x0: zs.x0, y0: zs.y0 });
-          const [kx, kz] = local(0, -zh / 2 - ROT_KNOB);
+          const [kx, kz] = local(0, zh / 2 + ROT_KNOB);   // knob now opposite the facing arrow
           if (Math.hypot(sx - kx, sz - kz) <= 8) {
             snap(); drag.current = { zone: selZone!, mode: "rotate", ox: zs.x, oy: zs.y, wx0: wx, wz0: wz }; handled = true;
           } else for (const [clx, clz] of [[-zw / 2, -zh / 2], [zw / 2, -zh / 2], [zw / 2, zh / 2], [-zw / 2, zh / 2]]) {
@@ -594,6 +729,21 @@ export default function MapEnlarger() {
           }
         }
       }
+      else if (tool === "bldg" && layer.bldg) {   // never grab markers the layer is hiding
+        // grab the nearest building marker within 14 px
+        let best: [number, number] | null = null, bestD = 14 * 14;
+        blds.forEach((bl, li) => bl.records.forEach((bd, ri) => {
+          const [bx, bz] = w2sc(bd.x, bd.z, cv.width, cv.height);
+          const dd = (bx - sx) * (bx - sx) + (bz - sz) * (bz - sz);
+          if (dd < bestD) { bestD = dd; best = [li, ri]; }
+        }));
+        if (best) {
+          const bd = blds[best[0]].records[best[1]];
+          undoRef.current.push({ type: "bldg-move", li: best[0], ri: best[1], x: bd.x, z: bd.z });
+          drag.current = { bldg: best, ox: bd.x, oy: bd.z, wx0: wx, wz0: wz };
+          rr();   // refs alone don't re-render: surface the new undo entry immediately
+        }
+      }
       else {
         drag.current = { painting: true, last: [wx, wz] };
         if (tool === "place") addTreesAt([[wx, wz]]);
@@ -603,7 +753,7 @@ export default function MapEnlarger() {
     } else if (e.type === "mousemove") {
       if (drag.current?.panning) {
         view.current.cx = drag.current.cx - (sx - drag.current.sx) / view.current.zoom;
-        view.current.cz = drag.current.cz - (sz - drag.current.sz) / view.current.zoom;
+        view.current.cz = drag.current.cz + (sz - drag.current.sz) / view.current.zoom;   // mirrored screen y
       } else if (drag.current?.zone !== undefined) {
         const zi = drag.current.zone;
         const z = deploy!.zones[zi];   // non-null: zone drags only start when deploy exists
@@ -612,7 +762,7 @@ export default function MapEnlarger() {
         const before = others.map(oz => zonesOverlap(z, oz));   // pre-step overlap state
         if (drag.current.mode === "rotate") {
           const [zsx, zsz] = w2sc(z.x, z.y, cv.width, cv.height);
-          z.o = Math.round((Math.atan2(sz - zsz, sx - zsx) + Math.PI / 2) * 1000) / 1000;
+          z.o = Math.round((Math.PI / 2 - Math.atan2(sz - zsz, sx - zsx)) * 1000) / 1000;   // knob trails the facing (screen-local +y), mirrored screen
         } else if (drag.current.mode === "resize") {
           // pointer in the zone's rotated frame; centre stays put, w/h follow the corner
           const dx = wx - z.x, dz = wz - z.y;
@@ -632,6 +782,10 @@ export default function MapEnlarger() {
         if (!zoneInBounds(z, mapSize / 2) || others.some((oz, i) => !before[i] && zonesOverlap(z, oz)))
           Object.assign(z, keep);
         deploy!.changed = true;
+      } else if (drag.current?.bldg) {
+        const bd = blds[drag.current.bldg[0]].records[drag.current.bldg[1]];
+        bd.x = Math.round((drag.current.ox + (wx - drag.current.wx0)) * 10) / 10;
+        bd.z = Math.round((drag.current.oy + (wz - drag.current.wz0)) * 10) / 10;
       } else if (drag.current?.painting) {
         const [lx, lz] = drag.current.last, d = Math.hypot(wx - lx, wz - lz);
         if (tool === "brush" && d > brushR * 0.6) { stamp(wx, wz); drag.current.last = [wx, wz]; }
@@ -647,13 +801,28 @@ export default function MapEnlarger() {
     const cv = canvasRef.current!;   // non-null: canvas is always mounted with the component
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      if (mode3d && t3.current) {   // same gate as draw()
+        // anchor the zoom on the cursor's ground point, so zooming in walks you there
+        const c = cam3.current, r3 = cv.getBoundingClientRect();
+        const mx = e.clientX - r3.left - cv.width / 2, my = e.clientY - r3.top - cv.height / 2;
+        const base = Math.min(cv.width, cv.height) / (mapSize * 1.45);
+        const sp3 = Math.max(0.05, Math.sin(c.pitch)), cy3 = Math.cos(c.yaw), sy3 = Math.sin(c.yaw);
+        const before = c.zoom;
+        c.zoom = Math.min(400, Math.max(0.3, c.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));   // 400 ≈ standing on the ground
+        const k = 1 / (base * before) - 1 / (base * c.zoom);
+        const a = mx * k, b = (my / sp3) * k;
+        c.cx = (c.cx ?? 0) + a * cy3 + b * sy3;
+        c.cz = (c.cz ?? 0) + a * sy3 - b * cy3;
+        if (!raf3.current) raf3.current = requestAnimationFrame(() => { raf3.current = 0; draw(); });
+        return;
+      }
       const rect = cv.getBoundingClientRect();
       const sx = e.clientX - rect.left, sz = e.clientY - rect.top;
       const [wx, wz] = s2wc(sx, sz, cv.width, cv.height);
       const v = view.current;
       v.zoom = Math.min(4, Math.max(0.02, v.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
       v.cx = wx - (sx - cv.width / 2) / v.zoom;
-      v.cz = wz - (sz - cv.height / 2) / v.zoom;
+      v.cz = wz + (sz - cv.height / 2) / v.zoom;   // mirrored screen y
       draw();
     };
     cv.addEventListener("wheel", onWheel, { passive: false });
@@ -715,6 +884,11 @@ export default function MapEnlarger() {
               orig {curBundle !== null && bundles[curBundle] && bundles[curBundle].origScale ? bundles[curBundle].origScale : "—"}
             </span>
           </div>
+          {curBundle !== null && bundles[curBundle]?.origBias && (
+            <p style={{ fontSize: 10, color: "#8a9179", margin: "1px 0 0" }}>
+              bias {+bundles[curBundle].origBias!} → {+bundles[curBundle].biasSet!}
+            </p>
+          )}
           {(() => {
             const orig = curBundle !== null && bundles[curBundle] ? bundles[curBundle].origScale : null;
             if (!orig) return null;
@@ -766,10 +940,10 @@ export default function MapEnlarger() {
           )}
 
         <label style={S.lbl}>Layers</label>
-        {(["colour", "alpha", "height", "trees", "deploy"] as const).map(k => (
+        {(["colour", "alpha", "height", "trees", "bldg", "deploy"] as const).map(k => (
           <div key={k} style={S.row}>
             <input type="checkbox" id={k} checked={layer[k]} onChange={e => setLayer({ ...layer, [k]: e.target.checked })} />
-            <label htmlFor={k} style={{ fontSize: 11 }}>{{ colour: "colour map (stretched)", alpha: "ground type map (roads)", height: "heightmap (stretched)", trees: "trees", deploy: "deployment zones" }[k]}</label>
+            <label htmlFor={k} style={{ fontSize: 11 }}>{{ colour: "colour map (stretched)", alpha: "ground type map (roads)", height: "heightmap (stretched)", trees: "trees", bldg: "buildings", deploy: "deployment zones" }[k]}</label>
           </div>
         ))}
         {deploy && (() => {
@@ -802,6 +976,20 @@ export default function MapEnlarger() {
         <div style={S.row}>
           <button style={S.btn(tool === "zones")} onClick={() => setTool("zones")}>zones (drag to move)</button>
         </div>
+        <div style={S.row}>
+          <button style={S.btn(tool === "bldg")} onClick={() => setTool("bldg")} disabled={!blds.length}>
+            buildings (drag to move{blds.length ? ` · ${blds.reduce((a, b) => a + b.records.length, 0)}` : ""})
+          </button>
+        </div>
+        {blds.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "3px 10px", fontSize: 10, color: "#8a9179", margin: "3px 0 0" }}>
+            {BLDG_CATS.map(c => (
+              <span key={c.name} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 8, height: 8, background: c.col, borderRadius: 2 }} />{c.name}
+              </span>
+            ))}
+          </div>
+        )}
         <label style={S.lbl}>Brush {brushR} m · density {density}</label>
         <input type="range" min={15} max={300} value={brushR} onChange={e => setBrushR(+e.target.value)} style={{ width: "100%" }} />
         <input type="range" min={1} max={25} value={density} onChange={e => setDensity(+e.target.value)} style={{ width: "100%" }} />
@@ -865,9 +1053,14 @@ export default function MapEnlarger() {
       {/* minWidth 0: without it the canvas's pixel width blocks this pane from
           shrinking, pushing the grid panel past the viewport */}
       <div style={{ flex: 1, position: "relative", minWidth: 0, overflow: "hidden" }}>
-        <canvas ref={canvasRef} style={{ display: "block", cursor: tool === "pan" ? "grab" : "crosshair" }}
+        <canvas ref={canvasRef} style={{ display: "block", cursor: mode3d || tool === "pan" ? "grab" : "crosshair" }}
           onMouseDown={onMouse} onMouseMove={onMouse} onMouseUp={onMouse} onMouseLeave={onMouse}
           onContextMenu={e => e.preventDefault()} />
+        <div style={{ position: "absolute", top: 10, right: 12, display: "flex", gap: 6, alignItems: "center" }}>
+          <button style={{ ...S.btn(!mode3d), flex: "none", padding: "6px 14px" }} onClick={() => setMode3d(false)}>2D</button>
+          <button style={{ ...S.btn(mode3d), flex: "none", padding: "6px 14px" }} disabled={!hmData} title={hmData ? "" : "needs a readable heightmap"}
+            onClick={() => { setMode3d(true); setStatus("3D terrain: drag = orbit · middle-drag = pan · wheel = zoom to cursor (down to ground level). Relief follows the height scale; editing tools stay in 2D."); }}>3D</button>
+        </div>
         <div style={S.status}>{status}</div>
       </div>
       {bundles.length > 0 && (

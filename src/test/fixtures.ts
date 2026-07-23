@@ -60,9 +60,47 @@ export function makeDDS(w: number, h: number, bits: 8 | 16 | 24 | 32, pixel: (i:
   return out as Uint8Array<ArrayBuffer>;
 }
 
+/** Hand-assembled .building_list, independent of the app codec: ESF 0xABCE header,
+ * [u32 end][0x0E name][0x0C x,z][0x10 rot][extra...] records, standard 2-name table. */
+export function buildBuildingListBuf(recs: { name: string; x: number; z: number; rot?: number; extra?: number[] }[], tag = "LRDZ"): Uint8Array<ArrayBuffer> {
+  const names = ["BATTLEFIELD_BUILDING_LIST", "BATTLEFIELD_BUILDING_LIST_BLOCK"];
+  const recBytes: number[] = [];
+  let off = 0x24;
+  for (const r of recs) {
+    const len = 4 + 3 + r.name.length * 2 + 9 + 3 + (r.extra?.length ?? 0);
+    const b = new Uint8Array(len), dv = new DataView(b.buffer);
+    off += len;
+    let p = 0;
+    dv.setUint32(p, off, true); p += 4;
+    b[p] = 0x0e; dv.setUint16(p + 1, r.name.length, true); p += 3;
+    for (const ch of r.name) { dv.setUint16(p, ch.charCodeAt(0), true); p += 2; }
+    b[p] = 0x0c; dv.setFloat32(p + 1, r.x, true); dv.setFloat32(p + 5, r.z, true); p += 9;
+    b[p] = 0x10; dv.setUint16(p + 1, r.rot ?? 0, true); p += 3;
+    b.set(r.extra ?? [], p);
+    recBytes.push(...b);
+  }
+  const nameBytes: number[] = [2, 0];
+  for (const n of names) { nameBytes.push(n.length & 0xff, n.length >> 8); for (const c of n) nameBytes.push(c.charCodeAt(0)); }
+  const header = new Uint8Array(0x24), hv = new DataView(header.buffer);
+  hv.setUint32(0, 0xabce, true);
+  for (let i = 0; i < 4; i++) header[8 + i] = tag.charCodeAt(i);
+  header[0x10] = 0x80; header[0x13] = 1;
+  header[0x18] = 0x81; hv.setUint16(0x19, 1, true);
+  hv.setUint32(0x0c, off, true); hv.setUint32(0x14, off, true); hv.setUint32(0x1c, off, true);
+  hv.setUint32(0x20, recs.length, true);
+  return new Uint8Array([...header, ...recBytes, ...nameBytes]) as Uint8Array<ArrayBuffer>;
+}
+
+export function defaultBuildingListBuf(): Uint8Array<ArrayBuffer> {
+  return buildBuildingListBuf([
+    { name: "small_barn_v1", x: 100, z: -50, rot: 4096 },
+    { name: "west_euro_hut03", x: -200, z: 300, extra: [0x0a, 0, 0, 0, 0] },
+  ]);
+}
+
 export const DEF_XML = `<?xml version="1.0"?>\n<battlefield base_terrain_width='1024.000000' base_terrain_height='1024.000000'/>`;
 
-export const HEIGHT_XML = `<height_map world_width='1024.000000' world_height='1024.000000' scale='0.600000'/>`;
+export const HEIGHT_XML = `<height_map world_width='1024.000000' world_height='1024.000000' scale='0.600000' bias='-5.000000'/>`;
 
 /** Real-world shape (BATTLE_DEPLOYMENT_AREA_HASH_TABLE root, <centre> tags).
  * Two blocks; block 0 has one zone per alliance. Integer coords so serialize()
@@ -98,6 +136,7 @@ export interface MapZipOpts {
   heightSettings?: string | null;
   deploy?: string | null;
   treeList?: Uint8Array<ArrayBuffer> | null;
+  buildings?: Uint8Array<ArrayBuffer> | null;
   dds?: Uint8Array<ArrayBuffer> | null;
   colourPng?: boolean;
 }
@@ -114,6 +153,7 @@ export async function makeMapZip(o: MapZipOpts = {}): Promise<File> {
   put("height_map_0_settings.xml", o.heightSettings, HEIGHT_XML);
   put("deployment_areas.xml", o.deploy, DEPLOY_XML);
   put("bmd.tree_list", o.treeList, defaultTreeListBuf());
+  put("bmd_near_buildings.building_list", o.buildings, defaultBuildingListBuf());
   put("height_map_0.dds", o.dds, makeDDS(4, 4, 8));
   if (o.colourPng !== false) zip.file(root + "colour_map_0.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
   const bytes = await zip.generateAsync({ type: "uint8array" });
