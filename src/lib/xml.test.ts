@@ -32,6 +32,12 @@ describe("shiftBias", () => {
     const xml = "<height_map world_width='1024.000000' scale='0.600000'/>";
     expect(shiftBias(xml, 2)).toBe(xml);
   });
+
+  it("clamps the sink at -10; a bias already below -10 stays put", () => {
+    expect(shiftBias("<h bias='-8.0'/>", 2)).toBe("<h bias='-10.000000'/>");     // -16 floored
+    expect(shiftBias("<h bias='-9.0'/>", 1.5)).toBe("<h bias='-10.000000'/>");   // -13.5 floored
+    expect(shiftBias("<h bias='-15.0'/>", 2)).toBe("<h bias='-15.000000'/>");    // never raised
+  });
 });
 
 describe("patchGridFx", () => {

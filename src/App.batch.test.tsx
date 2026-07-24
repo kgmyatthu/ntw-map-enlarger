@@ -2,7 +2,7 @@ import { it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import JSZip from "jszip";
 import App from "./App";
-import { makeMapZip, stubImage } from "./test/fixtures";
+import { makeMapZip, stubImage, buildRigidModelBuf } from "./test/fixtures";
 
 // Component tests for the batch-processing side of src/App.tsx:
 // zip input -> processBatch (auto ×2 height scale + one cluster fill pass)
@@ -108,6 +108,37 @@ it("building lists: parsed + scaled on import, tool button enabled with the reco
   // re-view the tile: the loaded status reports the parsed building count
   fireEvent.click(screen.getByText("mymap"));
   await screen.findByText(/2 buildings ✓/);
+});
+
+it("importing a rigidmodels zip loads low-LOD meshes for the 3D view", async () => {
+  const { container } = render(<App />);
+  const zip = new JSZip();
+  const mesh = buildRigidModelBuf([{ verts: [[-1, 0, -1], [1, 0, -1], [0, 5, 0]], idx: [0, 1, 2] }]);
+  zip.file("rigidmodels/buildings/small_barn_v1/small_barn_v1_piece01_destruct01_lod05.rigid_model", mesh);
+  zip.file("rigidmodels/buildings/small_barn_v1/small_barn_v1_piece01_destruct01_lod01.rigid_model", mesh);   // higher detail: ignored
+  const f = new File([await zip.generateAsync({ type: "uint8array" }) as Uint8Array<ArrayBuffer>], "models.zip", { type: "application/zip" });
+  const input = container.querySelector('input[accept=".zip,.rigid_model"]') as HTMLInputElement;
+  fireEvent.change(input, { target: { files: [f] } });
+  await screen.findByText(/Building models: 1 meshes loaded/);
+});
+
+it("hovering a marker with the bldg tool shows its model key", async () => {
+  const texts: string[] = [];
+  const origGC = HTMLCanvasElement.prototype.getContext;
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement, ...args: unknown[]) {
+    const ctx = (origGC as (...a: unknown[]) => CanvasRenderingContext2D).apply(this, args);
+    ctx.fillText = ((t: string) => { texts.push(t); }) as typeof ctx.fillText;
+    return ctx;
+  } as typeof origGC);
+
+  const { container } = render(<App />);
+  fireEvent.change(zipInput(container), { target: { files: [await makeMapZip()] } });
+  await screen.findByText(/Batch processed 1\/1 maps/);
+  fireEvent.click(screen.getByRole("button", { name: /buildings \(drag to move/ }));
+  const cv = container.querySelector("canvas")!;
+  // fixture barn at world (200,-100) -> mirrored screen (182, 91)
+  fireEvent.mouseMove(cv, { clientX: 182, clientY: 91 });
+  expect(texts).toContain("small_barn_v1");
 });
 
 it("building drag: mousedown grabs the nearest marker, mousemove moves it, undo restores", async () => {

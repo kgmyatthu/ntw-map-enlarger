@@ -14,6 +14,7 @@ function makeCtx(cv: HTMLCanvasElement): CanvasRenderingContext2D {
     beginPath: noop, closePath: noop, arc: noop, fill: noop, stroke: noop, setLineDash: noop,
     moveTo: noop, lineTo: noop,
     drawImage: noop, putImageData: noop,
+    measureText: (t: string) => ({ width: t.length * 6 }),
     createImageData: imageData,
     getImageData: (_x: number, _y: number, w: number, h: number) => imageData(w, h),
     fillStyle: "", strokeStyle: "", lineWidth: 1, globalAlpha: 1,

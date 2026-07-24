@@ -13,6 +13,8 @@ import { setScale, shiftBias, baseTerrainWidth, worldWidth, patchGridFx } from "
 import { w2s, s2w, addTrees, eraseTrees, stampPoints, zoneAt, applyUndo, makeColourWeight, makeRoadMask, makeDepressionSampler, makeBuildingMask, DEP_BARE, fillSpecies } from "./lib/edit";
 import { findFile, loadZipStore, enlargeStore, syncStore, exportEntries } from "./lib/store";
 import { buildTerrain, bucketTrees, bucketBuildings, bldgCat, BLDG_CATS, render3d } from "./lib/view3d";
+import { parseRigidModel } from "./lib/rigidModel";
+import type { RigidMesh } from "./lib/rigidModel";
 import type { Terrain } from "./lib/view3d";
 import { heightToCanvas, sampleImage, makeThumb, download, saveZip, saveZipInDir, pickExportDir, SP_COLORS } from "./lib/canvas";
 
@@ -74,6 +76,8 @@ export default function MapEnlarger() {
   const t3 = useRef<Terrain | null>(null);
   const buckets3 = useRef<Map<number, number[][]> | null>(null);
   const bucketsB = useRef<Map<number, number[][]> | null>(null);   // buildings, bucketed like trees
+  const bldgMeshes = useRef<{ list: RigidMesh[]; byName: Map<string, number> }>({ list: [], byName: new Map() });
+  const [meshCount, setMeshCount] = useState(0);
   const raf3 = useRef(0);   // pending rAF id: 3D input coalesces redraws to display refresh
   const drag = useRef<DragState | null>(null);
   const cursor = useRef<[number, number] | null>(null);
@@ -221,6 +225,50 @@ export default function MapEnlarger() {
     applyUndo(a, trees, deploy, blds);
     if (a.type === "fill") refreshCurThumb();
     rr();
+  };
+
+  // import NTW rigid models (a rigidmodels zip, per-model zips, or loose files):
+  // per building, keep the highest lod number = the lowest-poly intact mesh.
+  // Key comes from the FILENAME (…_pieceNN_destruct01_lodNN.rigid_model), so
+  // folder layout inside the zip doesn't matter.
+  const MODEL_RE = /(?:^|\/)([^/]+?)_piece\d+[^/]*_destruct01_lod(\d+)\.rigid_model$/i;
+  const importModels = async (fl: File[]) => {
+    setStatus(`Loading building models from ${fl.length} file(s)…`);
+    const best = new Map<string, { lod: number; bytes: Uint8Array }>();
+    const offer = (key: string, lod: number, bytes: Uint8Array) => {
+      const cur = best.get(key);
+      if (!cur || lod > cur.lod) best.set(key, { lod, bytes });
+    };
+    try {
+      for (const f of fl) {
+        if (/\.zip$/i.test(f.name)) {
+          const zip = await JSZip.loadAsync(f);
+          for (const p of Object.keys(zip.files)) {
+            const m = MODEL_RE.exec(p);
+            if (m && !zip.files[p].dir) offer(m[1].toLowerCase(), +m[2], new Uint8Array(await zip.files[p].async("arraybuffer")));
+          }
+        } else if (/\.rigid_model$/i.test(f.name)) {
+          const m = MODEL_RE.exec(f.name);
+          if (m) offer(m[1].toLowerCase(), +m[2], new Uint8Array(await f.arrayBuffer()));
+        }
+      }
+    } catch (e) {
+      setStatus(`Building models import FAILED: ${(e as Error).message}. Very large archives (the full 1.4 GB rigidmodels.zip) can exceed browser memory — import a zip of just the *_lod05.rigid_model files, or multi-select the per-model zips instead.`);
+      return;
+    }
+    const list: RigidMesh[] = [];
+    const byName = new Map<string, number>();
+    let failed = 0;
+    for (const [k, v] of best) {
+      try {
+        const mesh = parseRigidModel(v.bytes.buffer.slice(v.bytes.byteOffset, v.bytes.byteOffset + v.bytes.byteLength));
+        byName.set(k, list.length);
+        list.push(mesh);
+      } catch { failed++; }   // unknown variants keep the block preview
+    }
+    bldgMeshes.current = { list, byName };
+    setMeshCount(list.length);
+    setStatus(`Building models: ${list.length} meshes loaded${failed ? ` (${failed} unsupported → block preview)` : ""}. The 3D view uses them once buildings are big enough on screen.`);
   };
 
   const onGridFx = async (file: File) => {
@@ -518,7 +566,7 @@ export default function MapEnlarger() {
       const p = Object.keys(xmlRef.current).find(k => /height_map_0_settings\.xml$/.test(k));
       const m = p ? /\bscale='([0-9.\-]+)'/.exec(xmlRef.current[p]) : null;
       render3d(ctx, cw, ch, t3.current, cam3.current, mapSize, m ? parseFloat(m[1]) * 2.3 : 30, layer.trees ? buckets3.current : null, SP_COLORS, layer.colour,
-        layer.bldg ? bucketsB.current : null);
+        layer.bldg ? bucketsB.current : null, bldgMeshes.current.list);
       return;
     }
     const half = mapSize / 2, ihalf = imgExtent / 2;
@@ -590,7 +638,7 @@ export default function MapEnlarger() {
           if (rot) {
             ctx.save();
             ctx.translate(bsx, bsz);
-            ctx.rotate(-bd.rot / 65536 * 6.283);   // mirrored screen y
+            ctx.rotate(bd.rot / 65536 * 6.283);   // CW-positive game yaw + mirrored screen y cancel out
             ctx.fillRect(-bh, -bh, bh * 2, bh * 2);
             ctx.strokeRect(-bh, -bh, bh * 2, bh * 2);
             ctx.restore();
@@ -631,6 +679,24 @@ export default function MapEnlarger() {
         ctx.restore();
       });
     }
+    if (layer.bldg && tool === "bldg" && cursor.current && blds.length) {
+      // hover label: the raw model key of the nearest marker under the cursor
+      const [hx2, hz2] = w2sc(cursor.current[0], cursor.current[1], cw, ch);
+      let name: string | null = null, best = 16 * 16, lx2 = 0, lz2 = 0;
+      for (const bl of blds) for (const bd of bl.records) {
+        const [bsx, bsz] = w2sc(bd.x, bd.z, cw, ch);
+        const dd = (bsx - hx2) * (bsx - hx2) + (bsz - hz2) * (bsz - hz2);
+        if (dd < best) { best = dd; name = bd.name; lx2 = bsx; lz2 = bsz; }
+      }
+      if (name) {
+        ctx.font = "11px ui-monospace, monospace";
+        const tw2 = ctx.measureText(name).width;
+        ctx.fillStyle = "#10140fd9";
+        ctx.fillRect(lx2 + 10, lz2 - 21, tw2 + 10, 16);
+        ctx.fillStyle = "#e8e3c9";
+        ctx.fillText(name, lx2 + 15, lz2 - 9);
+      }
+    }
     if (cursor.current && tool !== "pan" && tool !== "bldg") {
       const [sx, sz] = w2sc(cursor.current[0], cursor.current[1], cw, ch);
       const rr2 = tool === "place" ? 8 : brushR * view.current.zoom;
@@ -652,7 +718,8 @@ export default function MapEnlarger() {
   useEffect(() => {
     buckets3.current = mode3d && trees && t3.current ? bucketTrees(trees.species, mapSize, t3.current.G) : null;
     bucketsB.current = mode3d && blds.length && t3.current
-      ? bucketBuildings(blds.map(bl => ({ records: bl.records, far: /far/i.test(bl.path) })), mapSize, t3.current.G) : null;
+      ? bucketBuildings(blds.map(bl => ({ records: bl.records, far: /far/i.test(bl.path) })), mapSize, t3.current.G,
+        n => bldgMeshes.current.byName.get(n.toLowerCase()) ?? -1) : null;
   });
   useEffect(() => { draw(); });
   useEffect(() => {
@@ -990,6 +1057,14 @@ export default function MapEnlarger() {
             ))}
           </div>
         )}
+        <label style={S.lbl}>Building models — 3D view ({meshCount ? `${meshCount} loaded` : "optional"})</label>
+        {/* non-null files: a file input's change event always carries a FileList */}
+        <input type="file" accept=".zip,.rigid_model" multiple style={{ fontSize: 11, width: "100%", color: "#b9b39a" }}
+          onChange={e => e.target.files!.length && importModels([...e.target.files!])} />
+        <p style={{ fontSize: 10, color: "#6d755f", lineHeight: 1.4, margin: "2px 0 0" }}>
+          import a rigidmodels zip (or loose .rigid_model files) and the 3D view
+          swaps building blocks for the real low-LOD meshes when zoomed in.
+        </p>
         <label style={S.lbl}>Brush {brushR} m · density {density}</label>
         <input type="range" min={15} max={300} value={brushR} onChange={e => setBrushR(+e.target.value)} style={{ width: "100%" }} />
         <input type="range" min={1} max={25} value={density} onChange={e => setDensity(+e.target.value)} style={{ width: "100%" }} />

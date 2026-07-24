@@ -1,12 +1,9 @@
-import type { Tree, Species, TreeList } from "../types";
+﻿import type { Tree, Species, TreeList } from "../types";
 
 // ---------- tree_list codec (LRDZ 14B / RIKI 16B records) ----------
 // Ported from byte-identical-verified Python (43 tree lists round-tripped).
-export function parseTreeList(buf: ArrayBufferLike): TreeList {
-  const d = new Uint8Array(buf);
-  const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
-  const magic = String.fromCharCode(d[8], d[9], d[10], d[11]);
-  const stride = magic === "RIKI" ? 16 : 14;
+/** Offsets of the 0x0E-tagged species name blocks (shared by parse and build). */
+function speciesStarts(d: Uint8Array, dv: DataView): { off: number; len: number }[] {
   const starts: { off: number; len: number }[] = [];
   let i = 0;
   while (i < d.length - 4) {
@@ -23,6 +20,15 @@ export function parseTreeList(buf: ArrayBufferLike): TreeList {
     }
     i++;
   }
+  return starts;
+}
+
+export function parseTreeList(buf: ArrayBufferLike): TreeList {
+  const d = new Uint8Array(buf);
+  const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+  const magic = String.fromCharCode(d[8], d[9], d[10], d[11]);
+  const stride = magic === "RIKI" ? 16 : 14;
+  const starts = speciesStarts(d, dv);
   if (!starts.length) throw new Error("no species blocks");
   const header = d.slice(0, starts[0].off);
   const species: Species[] = [];
@@ -66,9 +72,22 @@ export function buildTreeList(parsed: TreeList): Uint8Array<ArrayBuffer> {
   for (const s of species) size += s.nameBytes.length + 4 + s.trees.length * stride + s.trailing.length;
   const out = new Uint8Array(size);
   const dv = new DataView(out.buffer);
+  const odv = new DataView(origBytes.buffer, origBytes.byteOffset, origBytes.byteLength);
+  // segments copied verbatim from the original file, as [oldOff, newOff, len] --
+  // the section-chain links below live only in these (header + name/count +
+  // trailing), never inside tree records
+  const oStarts = speciesStarts(origBytes, odv);
+  const chain = oStarts.length === species.length;
+  const segs: [number, number, number][] = chain ? [[0, 0, header.length]] : [];
   let p = 0;
   out.set(header, p); p += header.length;
-  for (const s of species) {
+  for (let i = 0; i < species.length; i++) {
+    const s = species[i];
+    if (chain) {
+      const oEnd = i + 1 < oStarts.length ? oStarts[i + 1].off : origBytes.length;
+      segs.push([oStarts[i].off, p, s.nameBytes.length + 4]);
+      segs.push([oEnd - s.trailing.length, p + s.nameBytes.length + 4 + s.trees.length * stride, s.trailing.length]);
+    }
     out.set(s.nameBytes, p); p += s.nameBytes.length;
     dv.setUint32(p, s.trees.length * 256 + 8, true); p += 4;
     for (const t of s.trees) {
@@ -83,5 +102,24 @@ export function buildTreeList(parsed: TreeList): Uint8Array<ArrayBuffer> {
   const { hdr, ftr } = discoverSizeFields(origBytes);
   for (const [off, k] of hdr) dv.setUint32(off, size - k, true);
   for (const [feo, k] of ftr) dv.setUint32(size - feo, size - k, true);
+  // The file is a chain of sections: each [80 00 00 01 | 80 01 00 02|03] node
+  // tag is followed by the u32 ABSOLUTE offset of the next section header
+  // (verified on 218/218 preset maps). Adding/erasing trees shifts everything
+  // after, so every link must be remapped -- a stale link sends the game's
+  // parser mid-record and trees come out at garbage positions in game.
+  if (chain) {
+    const mapOff = (o: number): number | null => {
+      if (o === origBytes.length) return size;
+      for (const [old, nu, len] of segs) if (o >= old && o < old + len) return nu + (o - old);
+      return null;   // points inside a (resized) tree region: leave the link untouched
+    };
+    for (const [old, nu, len] of segs) for (let o = old; o + 8 <= old + len; o++) {
+      if (origBytes[o] !== 0x80 || origBytes[o + 2] !== 0x00) continue;
+      const a = origBytes[o + 1], b = origBytes[o + 3];
+      if (!(a === 0 && b === 1) && !(a === 1 && (b === 2 || b === 3))) continue;
+      const t = mapOff(odv.getUint32(o + 4, true));
+      if (t !== null) dv.setUint32(nu + (o - old) + 4, t, true);
+    }
+  }
   return out;
 }

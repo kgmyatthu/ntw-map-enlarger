@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseTreeList, buildTreeList, discoverSizeFields } from "./treeList";
-import { buildTreeListBuf, defaultTreeListBuf } from "../test/fixtures";
+import { buildTreeListBuf, defaultTreeListBuf, sectionedTreeListBuf } from "../test/fixtures";
 
 // Fixture layout: 8-byte prefix (u32le size + 4 pad) + 4-byte magic + 40 pad = 52-byte header.
 const HDR = 52;
@@ -180,6 +180,69 @@ describe("mutation then rebuild", () => {
     const dv = new DataView(out.buffer);
     expect(dv.getUint32(0, true)).toBe(99);  // header field rewritten
     expect(dv.getUint32(95, true)).toBe(99); // footer field rewritten at new end - 4
+  });
+});
+
+describe("section chain relocation", () => {
+  const t = (x: number, z: number) => ({ x, z });
+  const makeSections = () => [
+    [
+      { name: "oak_tree_alpha", trees: [t(1, 2), t(3, 4)] },
+      { name: "ash_tree_beta", trees: [t(5, 6)] },
+    ],
+    [
+      { name: "elm_tree_gamma", trees: [t(7, 8), t(9, 10), t(11, 12)] },
+      { name: "fir_tree_delta", trees: [t(13, 14)] },
+    ],
+  ];
+  /** All [80 01 00 02] nodes as [markerOffset, storedLink]. */
+  const chainOf = (d: Uint8Array): [number, number][] => {
+    const dv = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const out: [number, number][] = [];
+    for (let i = 0; i + 8 <= d.length; i++)
+      if (d[i] === 0x80 && d[i + 1] === 0x01 && d[i + 2] === 0x00 && d[i + 3] === 0x02)
+        out.push([i, dv.getUint32(i + 4, true)]);
+    return out;
+  };
+  const expectLinked = (d: Uint8Array) => {
+    const c = chainOf(d);
+    expect(c.length).toBe(3); // header node + section-2 node + terminal node
+    c.forEach(([, link], i) => expect(link).toBe(i + 1 < c.length ? c[i + 1][0] : d.length));
+  };
+
+  it("fixture is chain-consistent and round-trips byte-identical", () => {
+    const buf = sectionedTreeListBuf(makeSections());
+    expectLinked(buf);
+    const p = parseTreeList(buf.buffer);
+    expect(p.species.map(s => s.name)).toEqual(["oak_tree_alpha", "ash_tree_beta", "elm_tree_gamma", "fir_tree_delta"]);
+    expect(buildTreeList(p)).toEqual(buf);
+  });
+
+  it("adding trees to a first-section species remaps every downstream link", () => {
+    const buf = sectionedTreeListBuf(makeSections());
+    const p = parseTreeList(buf.buffer);
+    for (let i = 0; i < 10; i++)
+      p.species[0].trees.push({ x: 50 + i, z: -80, extra: new Uint8Array(4).fill(0xbb), isNew: true });
+    const out = buildTreeList(p);
+    expect(out.length).toBe(buf.length + 10 * 14);
+    expectLinked(out); // the stale-by-140-bytes bug: these links pointed mid-record
+    const rp = parseTreeList(out.buffer);
+    expect(rp.species[0].trees).toHaveLength(12);
+    expect(rp.species[3].trees.map(tr => [tr.x, tr.z])).toEqual([[13, 14]]);
+  });
+
+  it("adding trees to the last species keeps the terminal link at EOF", () => {
+    const p = parseTreeList(sectionedTreeListBuf(makeSections()).buffer);
+    p.species[3].trees.push({ x: 99, z: 99, extra: new Uint8Array(4).fill(1), isNew: true });
+    expectLinked(buildTreeList(p));
+  });
+
+  it("erasing trees remaps links downward", () => {
+    const p = parseTreeList(sectionedTreeListBuf(makeSections()).buffer);
+    p.species[2].trees.length = 0;
+    const out = buildTreeList(p);
+    expectLinked(out);
+    expect(parseTreeList(out.buffer).species[2].trees).toHaveLength(0);
   });
 });
 

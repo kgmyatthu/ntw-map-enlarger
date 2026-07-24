@@ -43,6 +43,56 @@ export function buildTreeListBuf(species: FixSpecies[], magic: "LRDZ" | "RIKI" =
   return out as Uint8Array<ArrayBuffer>;
 }
 
+/**
+ * Build an LRDZ tree_list with the real files' section-chain structure
+ * (modelled byte-for-byte on the vanilla presets): the 42-byte header ends
+ * with a section node [80 01 00 02][u32 -> next section][08 u32 count], the
+ * last species of each section carries the next section's node in its
+ * trailing, and the final species carries the terminal node pointing at EOF.
+ */
+export function sectionedTreeListBuf(sections: FixSpecies[][]): Uint8Array<ArrayBuffer> {
+  const parts: number[] = [0xce, 0xab, 0, 0, 0, 0, 0, 0];
+  for (const ch of "LRDZ") parts.push(ch.charCodeAt(0));
+  parts.push(0, 0, 0, 0);                  // @12: file size, patched below
+  parts.push(0x80, 0x00, 0x00, 0x01);      // root node
+  parts.push(0, 0, 0, 0);                  // @20: file size
+  parts.push(0x08, 0x03, 0x00, 0x00, 0x00);
+  const markers: number[] = [];            // start offset of every section node
+  const links: number[] = [];              // offset of the u32 link inside each node
+  const pushNode = (cnt: number) => {
+    markers.push(parts.length);
+    parts.push(0x80, 0x01, 0x00, 0x02);
+    links.push(parts.length);
+    parts.push(0, 0, 0, 0);                // next-section offset, patched below
+    parts.push(0x08, cnt & 0xff, (cnt >> 8) & 0xff, 0, 0);
+  };
+  pushNode(sections[0].length);            // header is 42 B, like the presets
+  sections.forEach((sec, si) => {
+    sec.forEach((s, i) => {
+      if (s.name.length < 4 || s.name.length > 200) throw new Error("species name must be 4..200 chars");
+      parts.push(0x0e, s.name.length & 0xff, s.name.length >> 8);
+      for (const ch of s.name) parts.push(ch.charCodeAt(0), 0);
+      const count = s.trees.length * 256 + 8;
+      parts.push(count & 0xff, (count >> 8) & 0xff, (count >> 16) & 0xff, (count >> 24) & 0xff);
+      for (const t of s.trees) {
+        parts.push(0x00, 0x0c);
+        const f = new DataView(new ArrayBuffer(8));
+        f.setFloat32(0, t.x, true); f.setFloat32(4, t.z, true);
+        for (let k = 0; k < 8; k++) parts.push(f.getUint8(k));
+        parts.push(...(t.extra ?? [0xaa, 0xaa, 0xaa, 0xaa]));
+      }
+      parts.push(0x00);
+      if (i === sec.length - 1) pushNode(si + 1 < sections.length ? sections[si + 1].length : 0);
+    });
+  });
+  const out = new Uint8Array(parts);
+  const dv = new DataView(out.buffer);
+  links.forEach((lo, i) => dv.setUint32(lo, i + 1 < markers.length ? markers[i + 1] : out.length, true));
+  dv.setUint32(12, out.length, true);
+  dv.setUint32(20, out.length, true);
+  return out as Uint8Array<ArrayBuffer>;
+}
+
 /** Minimal uncompressed DDS: h at byte 12, w at 16, bits at 88, pixels from byte 128. */
 export function makeDDS(w: number, h: number, bits: 8 | 16 | 24 | 32, pixel: (i: number) => number = i => (i * 37) % 256): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(128 + w * h * (bits / 8));
@@ -96,6 +146,32 @@ export function defaultBuildingListBuf(): Uint8Array<ArrayBuffer> {
     { name: "small_barn_v1", x: 100, z: -50, rot: 4096 },
     { name: "west_euro_hut03", x: -200, z: 300, extra: [0x0a, 0, 0, 0, 0] },
   ]);
+}
+
+/** Hand-assembled NTW .rigid_model (independent of the app codec): [u32 nSub], per sub
+ * [magic 0x12345678][u32 lod][u8][3 texture names + 3 extra slots as u16 len/utf16/u8 0]
+ * [u32 nVert][80B verts, pos f32x3][u32 nIdx][u32 idx], then a 6xf32 bbox trailer. */
+export function buildRigidModelBuf(
+  subs: { verts: [number, number, number][]; idx: number[]; tex?: string[] }[],
+  bbox: number[] = [0, 0, 0, 1, 1, 1],
+  extras: string[] = ["", "", ""],
+): Uint8Array<ArrayBuffer> {
+  const parts: number[] = [];
+  const u32 = (v: number) => parts.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+  const u16 = (v: number) => parts.push(v & 0xff, (v >> 8) & 0xff);
+  const f32 = (v: number) => { const b = new Uint8Array(4); new DataView(b.buffer).setFloat32(0, v, true); parts.push(...b); };
+  u32(subs.length);
+  for (const s of subs) {
+    u32(0x12345678); u32(5); parts.push(0);
+    const names = [...(s.tex ?? ["difftex", "normtex", "glosstex"]), ...extras];
+    for (const t of names) { u16(t.length); for (const ch of t) u16(ch.charCodeAt(0)); parts.push(0); }
+    u32(s.verts.length);
+    for (const [x, y, z] of s.verts) { f32(x); f32(y); f32(z); for (let i = 0; i < 68; i++) parts.push(0); }
+    u32(s.idx.length);
+    for (const i of s.idx) u32(i);
+  }
+  for (const v of bbox) f32(v);
+  return new Uint8Array(parts) as Uint8Array<ArrayBuffer>;
 }
 
 export const DEF_XML = `<?xml version="1.0"?>\n<battlefield base_terrain_width='1024.000000' base_terrain_height='1024.000000'/>`;

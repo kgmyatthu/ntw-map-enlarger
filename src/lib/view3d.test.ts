@@ -207,6 +207,46 @@ describe("render3d", () => {
     expect(px.includes(TOP)).toBe(true);   // the roof face
   });
 
+  it("an imported mesh replaces the block when big enough on screen", () => {
+    const { ctx, out } = makeCtx();
+    const t = buildTerrain(hm(2, 2, [0.5, 0.5, 0.5, 0.5]), null, 2, 2);
+    const bldgs = bucketBuildings([{ records: [{ name: "romanic_church", x: 0, z: 0, rot: 0 }] }], 100, 2,
+      n => n === "romanic_church" ? 0 : -1);
+    const mesh = {
+      verts: new Float32Array([-8, 0, -8, 8, 0, -8, 0, 14, 0, -8, 0, 8, 8, 0, 8]),
+      idx: new Uint32Array([0, 1, 2, 3, 4, 2]),
+    };
+    const cam = { yaw: 0.5, pitch: 1, zoom: 1 };
+    render3d(ctx, 100, 100, t, cam, 100, 50, null, [], true, bldgs, [mesh]);
+    const withMesh = new Uint8ClampedArray(out.frame!.data);
+    render3d(ctx, 100, 100, t, cam, 100, 50, null, [], true, bldgs, []);
+    const withBlock = out.frame!.data;
+    expect([...withBlock].some((v, i) => v !== withMesh[i])).toBe(true);   // different geometry rendered
+  });
+
+  it("mesh yaw is CW-positive: a 45-degree fence paints down-right on screen", () => {
+    // fence-chain ground truth (9588 pairs, antietam): world angle of model x = -rot.
+    // rot 8192 = 45 deg -> world dir (+x, -z) -> mirrored screen down-right diagonal.
+    const { ctx, out } = makeCtx();
+    const t = buildTerrain(hm(2, 2, [0.5, 0.5, 0.5, 0.5]), null, 2, 2);
+    const bldgs = bucketBuildings([{ records: [{ name: "nsc_stone_field_wall_01", x: 0, z: 0, rot: 8192 }] }], 100, 2, () => 0);
+    const ribbon = {
+      verts: new Float32Array([-10, 0, 0, 10, 0, 0, 10, 4, 0, -10, 4, 0]),
+      idx: new Uint32Array([0, 1, 2, 0, 2, 3]),
+    };
+    const cam = { yaw: 0, pitch: 1, zoom: 2 };
+    render3d(ctx, 100, 100, t, cam, 100, 50, null, [], true, bldgs, [ribbon]);
+    const withMesh = new Uint32Array(out.frame!.data.buffer.slice(0));
+    render3d(ctx, 100, 100, t, cam, 100, 50, null, [], true, null, [ribbon]);
+    const bare = new Uint32Array(out.frame!.data.buffer);
+    const xs: number[] = [], ys: number[] = [];
+    for (let i = 0; i < withMesh.length; i++) if (withMesh[i] !== bare[i]) { xs.push(i % 100); ys.push((i / 100) | 0); }
+    expect(xs.length).toBeGreaterThan(20);
+    const mx = xs.reduce((a, b) => a + b) / xs.length, my = ys.reduce((a, b) => a + b) / ys.length;
+    const cov = xs.reduce((a, x, i) => a + (x - mx) * (ys[i] - my), 0);
+    expect(cov).toBeGreaterThan(0);   // down-right; the old CCW reading painted up-right (cov < 0)
+  });
+
   it("bucketBuildings classifies name families into visual dims", () => {
     const b = bucketBuildings([{ records: [
       { name: "nsc_stone_field_wall_01", x: -25, z: 25, rot: 0 },
